@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-	// Database connection
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://postgres:postgres@localhost:5437/sayless?sslmode=disable"
@@ -30,28 +29,25 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Test the connection
 	if err := pool.Ping(ctx); err != nil {
 		log.Fatalf("Failed to ping database: %v", err)
 	}
+
+	if err := models.Migrate(pool); err != nil {
+		log.Fatalf("Failed to migrate database: %v", err)
+	}
 	log.Println("Connected to database")
 
-	// Spotify client
 	spotifyClient := spotify.NewClient()
 
-	// Container
 	container := &models.Container{
 		DB:      pool,
 		Spotify: spotifyClient,
 	}
 
-	// Handler
 	h := handlers.New(container)
 
-	// Router
 	r := gin.Default()
-
-	// CORS
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
@@ -59,11 +55,14 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	// Routes
 	r.GET("/api/health", h.Health)
 	r.POST("/api/generate", h.Generate)
+	r.POST("/api/share", h.SaveShare)
+	r.GET("/api/share/:id", h.GetShare)
+	r.GET("/api/spotify/login", h.SpotifyLogin)
+	r.GET("/api/spotify/callback", h.SpotifyCallback)
+	r.POST("/api/spotify/playlist", h.CreatePlaylist)
 
-	// Start
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8086"
