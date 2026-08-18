@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: sayless-backend
+    ports:
+      - "8086:8086"
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/sayless?sslmode=disable
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - PORT=8086
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: sayless-frontend
+    ports:
+      - "3006:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: sayless-db
+    ports:
+      - "5437:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=sayless
+    volumes:
+      - sayless-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  sayless-data:
