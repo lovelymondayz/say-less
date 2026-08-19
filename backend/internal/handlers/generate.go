@@ -112,19 +112,33 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 	if len(tracks) == 0 && matcher.IsIndonesian(text) {
 		translated := matcher.TranslateIndonesian(text)
 		if translated != normalized {
-			engWords := matcher.SplitWords(translated)
-			var engSelectedTitles []string
+			// Search the FULL translated phrase first (better results)
 			engSearcher := func(phrase string) (*matcher.Track, float64) {
-				return h.searchAndScore(phrase, mode, engSelectedTitles)
+				return h.searchAndScore(phrase, mode, nil)
 			}
-			if mode == matcher.ModeExact {
-				tracks = matcher.FindOptimalExact(engWords, engSearcher, mode)
+			if track, score := engSearcher(translated); track != nil && score > 40 {
+				tracks = []matcher.Track{*track}
 			} else {
-				tracks = matcher.FindOptimalSegmentation(engWords, engSearcher, mode)
-			}
-			for _, t := range tracks {
-				if t.Title != "[unavailable]" {
-					engSelectedTitles = append(engSelectedTitles, strings.ToUpper(t.Title))
+				// Try full original phrase
+				if track, score := searcher(normalized); track != nil && score > 40 {
+					tracks = []matcher.Track{*track}
+				} else {
+					// Fall back to word-by-word on translated text
+					engWords := matcher.SplitWords(translated)
+					var engSelectedTitles []string
+					engWordSearcher := func(phrase string) (*matcher.Track, float64) {
+						return h.searchAndScore(phrase, mode, engSelectedTitles)
+					}
+					if mode == matcher.ModeExact {
+						tracks = matcher.FindOptimalExact(engWords, engWordSearcher, mode)
+					} else {
+						tracks = matcher.FindOptimalSegmentation(engWords, engWordSearcher, mode)
+					}
+					for _, t := range tracks {
+						if t.Title != "[unavailable]" {
+							engSelectedTitles = append(engSelectedTitles, strings.ToUpper(t.Title))
+						}
+					}
 				}
 			}
 		}
