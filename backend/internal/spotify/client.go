@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -145,28 +144,21 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	// Retry with backoff on 429
+	// Retry with backoff on 429 - fail fast, return partial results
 	var tracks []Track
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 2; attempt++ {
 		req2, _ := http.NewRequest("GET", apiURL, nil)
 		req2.Header.Set("Authorization", "Bearer "+token)
 		resp2, err := c.httpClient.Do(req2)
 		if err != nil {
-			return nil, err
+			break // Don't retry on network errors
 		}
 		defer resp2.Body.Close()
 
 		body, _ := io.ReadAll(resp2.Body)
 		if resp2.StatusCode == 429 {
-			// Rate limited - wait and retry
-			retryAfter := resp2.Header.Get("Retry-After")
-			if retryAfter != "" {
-				seconds, _ := strconv.Atoi(retryAfter)
-				time.Sleep(time.Duration(seconds) * time.Second)
-			} else {
-				time.Sleep(time.Duration(attempt+1) * time.Second)
-			}
-			continue
+			// Rate limited - return empty (don't block)
+			break
 		}
 		if resp2.StatusCode != 200 {
 			return nil, fmt.Errorf("spotify search error %d: %s", resp2.StatusCode, string(body))
