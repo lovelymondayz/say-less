@@ -148,16 +148,18 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	// Retry with backoff on 429
 	var tracks []Track
 	for attempt := 0; attempt < 3; attempt++ {
-		resp, err := c.httpClient.Do(req)
+		req2, _ := http.NewRequest("GET", apiURL, nil)
+		req2.Header.Set("Authorization", "Bearer "+token)
+		resp2, err := c.httpClient.Do(req2)
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
+		defer resp2.Body.Close()
 
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == 429 {
+		body, _ := io.ReadAll(resp2.Body)
+		if resp2.StatusCode == 429 {
 			// Rate limited - wait and retry
-			retryAfter := resp.Header.Get("Retry-After")
+			retryAfter := resp2.Header.Get("Retry-After")
 			if retryAfter != "" {
 				seconds, _ := strconv.Atoi(retryAfter)
 				time.Sleep(time.Duration(seconds) * time.Second)
@@ -166,8 +168,8 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 			}
 			continue
 		}
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("spotify search error %d: %s", resp.StatusCode, string(body))
+		if resp2.StatusCode != 200 {
+			return nil, fmt.Errorf("spotify search error %d: %s", resp2.StatusCode, string(body))
 		}
 
 		var rawResp struct {
