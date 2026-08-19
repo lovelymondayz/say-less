@@ -50,7 +50,7 @@ type Result struct {
 
 func Normalize(input string) string {
 	s := strings.ToUpper(input)
-	
+
 	// Replace common contractions
 	replacements := map[string]string{
 		"DON'T": "DO NOT", "WON'T": "WILL NOT", "CAN'T": "CANNOT",
@@ -62,11 +62,11 @@ func Normalize(input string) string {
 		"IT'S": "IT IS", "THAT'S": "THAT IS", "WHAT'S": "WHAT IS", "WHO'S": "WHO IS",
 		"LET'S": "LET US",
 	}
-	
+
 	for contraction, expanded := range replacements {
 		s = strings.ReplaceAll(s, contraction, expanded)
 	}
-	
+
 	// Keep letters, numbers, spaces, emojis, and some meaningful chars
 	var b strings.Builder
 	for _, r := range s {
@@ -81,7 +81,7 @@ func Normalize(input string) string {
 			b.WriteRune(' ')
 		}
 	}
-	
+
 	result := strings.Join(strings.Fields(b.String()), " ")
 	return strings.TrimSpace(result)
 }
@@ -94,14 +94,42 @@ func Phrase(words []string, start, end int) string {
 	return strings.Join(words[start:end], " ")
 }
 
+// isEmoji checks if a string is purely emojis
+func isEmoji(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x1F600 && r < 0x2600 {
+			return false
+		}
+	}
+	return true
+}
+
+// shouldSkipWord returns true if the word should be skipped in phrase search
+func shouldSkipWord(word string) bool {
+	// Skip single-letter words (I, A)
+	if len(word) <= 1 {
+		return true
+	}
+	// Skip pure emojis
+	if isEmoji(word) {
+		return true
+	}
+	return false
+}
+
 type DPScore struct {
-	Score      float64
-	Phrase     string
-	Track      *Track
-	PrevIdx    int
+	Score       float64
+	Phrase      string
+	Track       *Track
+	PrevIdx     int
 	Unavailable bool
 }
 
+// FindOptimalSegmentation finds the best phrase-first segmentation.
+// It uses dynamic programming with phrase containment filtering.
 func FindOptimalSegmentation(words []string, searcher func(string) (*Track, float64), mode Mode) []Track {
 	n := len(words)
 	if n == 0 {
@@ -116,14 +144,22 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 
 		for j := 0; j < i; j++ {
 			phrase := Phrase(words, j, i)
+			phraseLen := i - j
+
+			// Skip single-letter phrases (but allow them in fallback)
+			if phraseLen == 1 && shouldSkipWord(words[j]) {
+				continue
+			}
+
 			track, score := searcher(phrase)
 
 			if track == nil {
 				continue
 			}
 
-			lengthBonus := float64(i-j) * 5.0
-			
+			// Strong length bonus — prefer longer phrases
+			lengthBonus := float64(phraseLen * phraseLen) * 10.0
+
 			switch mode {
 			case ModeExact:
 				if score < 80 {
@@ -138,7 +174,8 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 				}
 				lengthBonus *= 0.5
 			case ModeSmart:
-				lengthBonus *= 1.0
+				// Smart mode strongly prefers longer phrases
+				lengthBonus *= 1.5
 			}
 
 			totalScore := dp[j].Score + score + lengthBonus
@@ -164,13 +201,13 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 			if lastValid >= 0 && lastValid < i {
 				phrase := Phrase(words, lastValid, i)
 				track, score := searcher(phrase)
-				
+
 				if mode == ModeExact && (track == nil || score < 80) {
 					// Exact mode: mark segment as unavailable instead of falling back
-					totalScore := dp[lastValid].Score - 10 // penalty
+					totalScore := dp[lastValid].Score - 10
 					dp[i].Score = totalScore
 					dp[i].Phrase = phrase
-					dp[i].Track = nil // Will be handled in backtracking
+					dp[i].Track = nil
 					dp[i].PrevIdx = lastValid
 					dp[i].Unavailable = true
 				} else if track != nil && score > 30 {
@@ -188,10 +225,9 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 	var tracks []Track
 	idx := n
 	seen := make(map[string]bool)
-	
+
 	for idx > 0 {
 		if dp[idx].Unavailable {
-			// Insert placeholder for unavailable segment
 			placeholder := Track{
 				ID:            fmt.Sprintf("unavailable-%d", idx),
 				Title:         "[unavailable]",
@@ -226,4 +262,116 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 	}
 
 	return tracks
+}
+
+// ExactMatcher implements the strict phrase-first matching algorithm.
+type ExactMatcher struct {
+	searcher func(string) (*Track, float64)
+	mode     Mode
+	words    []string
+	n        int
+}
+
+func NewExactMatcher(words []string, searcher func(string) (*Track, float64), mode Mode) *ExactMatcher {
+	return &ExactMatcher{
+		searcher: searcher,
+		mode:     mode,
+		words:    words,
+		n:        len(words),
+	}
+}
+
+func (em *ExactMatcher) FindBestSegmentation() []Track {
+	if em.n == 0 {
+		return nil
+	}
+
+	var tracks []Track
+	seen := make(map[string]bool)
+	covered := make(map[int]bool)
+
+	// Try longest phrases first
+	for length := em.n; length >= 1; length-- {
+		for start := 0; start <= em.n-length; start++ {
+			end := start + length
+
+			alreadyCovered := false
+			for i := start; i < end; i++ {
+				if covered[i] {
+					alreadyCovered = true
+					break
+				}
+			}
+			if alreadyCovered {
+				continue
+			}
+
+			phrase := strings.Join(em.words[start:end], " ")
+
+			if length == 1 && shouldSkipWord(em.words[start]) {
+				continue
+			}
+
+			track, score := em.searcher(phrase)
+
+			if track == nil {
+				continue
+			}
+
+			if length == 1 && score < 80 {
+				continue
+			}
+
+			if length > 1 && score < 60 {
+				continue
+			}
+
+			if !seen[track.ID] {
+				tracks = append(tracks, *track)
+				seen[track.ID] = true
+				for i := start; i < end; i++ {
+					covered[i] = true
+				}
+			}
+		}
+	}
+
+	// Fill uncovered words
+	for i := 0; i < em.n; i++ {
+		if covered[i] {
+			continue
+		}
+		word := em.words[i]
+		if shouldSkipWord(word) {
+			covered[i] = true
+			continue
+		}
+		track, score := em.searcher(word)
+		if track != nil && score >= 80 && !seen[track.ID] {
+			tracks = append(tracks, *track)
+			seen[track.ID] = true
+			covered[i] = true
+		}
+	}
+
+	if len(tracks) == 0 {
+		for i := 0; i < em.n; i++ {
+			if covered[i] {
+				continue
+			}
+			track, _ := em.searcher(em.words[i])
+			if track != nil && !seen[track.ID] {
+				tracks = append(tracks, *track)
+				seen[track.ID] = true
+				covered[i] = true
+			}
+		}
+	}
+
+	return tracks
+}
+
+func FindOptimalExact(words []string, searcher func(string) (*Track, float64), mode Mode) []Track {
+	em := NewExactMatcher(words, searcher, mode)
+	return em.FindBestSegmentation()
 }

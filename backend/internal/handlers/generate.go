@@ -88,7 +88,6 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 	normalized := matcher.Normalize(text)
 	words := matcher.SplitWords(normalized)
 
-	// Track selected titles for repetitive title avoidance
 	var selectedTitles []string
 
 	searcher := func(phrase string) (*matcher.Track, float64) {
@@ -97,7 +96,6 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 
 	var tracks []matcher.Track
 	if mode == matcher.ModeExact {
-		// Use the strict phrase-first exact matcher
 		tracks = matcher.FindOptimalExact(words, searcher, mode)
 	} else {
 		tracks = matcher.FindOptimalSegmentation(words, searcher, mode)
@@ -107,6 +105,15 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 	for _, t := range tracks {
 		if t.Title != "[unavailable]" {
 			selectedTitles = append(selectedTitles, strings.ToUpper(t.Title))
+		}
+	}
+
+	// Semantic fallback: if all tracks are single-word matches, try semantic for whole phrase
+	if len(tracks) > 0 && len(tracks) == len(words) && mode == matcher.ModeSmart {
+		semanticTrack, semanticScore := h.semanticFallback(text, mode, selectedTitles)
+		if semanticTrack != nil && semanticScore > 50 {
+			// Replace the word-by-word result with the semantic match
+			tracks = []matcher.Track{*semanticTrack}
 		}
 	}
 
@@ -153,7 +160,6 @@ func (h *Handler) Regenerate(c *gin.Context) {
 		mode = matcher.ModeSmart
 	}
 
-	// If strategy changes mode, apply it
 	if req.Strategy == "chaos" {
 		mode = matcher.ModeChaos
 	} else if req.Strategy == "accurate" || req.Strategy == "improve" {
@@ -162,7 +168,6 @@ func (h *Handler) Regenerate(c *gin.Context) {
 		mode = matcher.ModeSmart
 	}
 
-	// For "improve" and "popular", adjust scoring
 	result := h.generateWithMode(req.Text, mode)
 
 	c.JSON(http.StatusOK, result)
@@ -290,7 +295,7 @@ func (h *Handler) CreatePlaylist(c *gin.Context) {
 }
 
 // searchAndScore searches Spotify for the phrase and scores the best track.
-// It also performs semantic fallback when exact/phrase matching fails.
+// It uses phrase containment filtering — only tracks whose title contains the phrase are accepted.
 func (h *Handler) searchAndScore(phrase string, mode matcher.Mode, selectedTitles []string) (*matcher.Track, float64) {
 	tracks, err := h.container.Spotify.SearchTracks(phrase, 10)
 	if err != nil {
@@ -298,7 +303,6 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode, selectedTitle
 		return nil, 0
 	}
 	if len(tracks) == 0 {
-		// Semantic fallback: try related keywords
 		return h.semanticFallback(phrase, mode, selectedTitles)
 	}
 
@@ -326,14 +330,6 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode, selectedTitle
 		}
 	}
 
-	// If no good match found, try semantic fallback
-	if bestScore < 40 {
-		semanticTrack, semanticScore := h.semanticFallback(phrase, mode, selectedTitles)
-		if semanticTrack != nil && semanticScore > bestScore {
-			return semanticTrack, semanticScore
-		}
-	}
-
 	return bestTrack, bestScore
 }
 
@@ -347,7 +343,6 @@ func (h *Handler) semanticFallback(phrase string, mode matcher.Mode, selectedTit
 	var bestTrack *matcher.Track
 	bestScore := 0.0
 
-	// Try first 5 keywords
 	limit := 5
 	if len(keywords) < 5 {
 		limit = len(keywords)
@@ -361,11 +356,8 @@ func (h *Handler) semanticFallback(phrase string, mode matcher.Mode, selectedTit
 		}
 
 		for _, t := range tracks {
-			// Boost semantic matches so they rank above poor exact matches
-			// but below good exact matches
 			semanticScore := 45.0 + float64(t.Popularity)*0.2
 
-			// Check for repetitive titles
 			if isRepetitiveTitle(t.Name, selectedTitles) {
 				semanticScore -= 30
 			}
@@ -402,7 +394,6 @@ func isRepetitiveTitle(title string, selectedTitles []string) bool {
 
 	for _, sel := range selectedTitles {
 		selWords := strings.Fields(sel)
-		// Check if first 2-3 words match
 		matchCount := 0
 		for i := 0; i < len(titleWords) && i < len(selWords) && i < 3; i++ {
 			if titleWords[i] == selWords[i] {
@@ -419,6 +410,32 @@ func isRepetitiveTitle(title string, selectedTitles []string) bool {
 func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedTitles []string) float64 {
 	phraseUpper := strings.ToUpper(strings.TrimSpace(phrase))
 	trackUpper := strings.ToUpper(strings.TrimSpace(track.Name))
+
+	// Phrase containment filter: track title must contain the phrase (or vice versa)
+	phraseWords := strings.Fields(phraseUpper)
+	trackWords := strings.Fields(trackUpper)
+
+	// Check if track title contains the full phrase
+	containsPhrase := strings.Contains(trackUpper, phraseUpper)
+	// Check if phrase contains the track title
+	phraseContains := strings.Contains(phraseUpper, trackUpper)
+
+	// For multi-word phrases, require containment
+	if len(phraseWords) > 1 && !containsPhrase && !phraseContains {
+		// Check if most words match
+		matchedWords := 0
+		for _, pw := range phraseWords {
+			for _, tw := range trackWords {
+				if pw == tw {
+					matchedWords++
+					break
+				}
+			}
+		}
+		if matchedWords < len(phraseWords)/2 {
+			return 0 // Reject — track doesn't contain enough of the phrase
+		}
+	}
 
 	baseScore := 0.0
 
@@ -438,15 +455,12 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedT
 
 		if stripPunct(phraseUpper) == stripPunct(trackUpper) {
 			baseScore = 95.0
-		} else if strings.Contains(trackUpper, phraseUpper) {
+		} else if containsPhrase {
 			baseScore = 85.0 - float64(len(trackUpper)-len(phraseUpper))*0.5
-		} else if strings.Contains(phraseUpper, trackUpper) {
+		} else if phraseContains {
 			baseScore = 75.0
 		} else {
 			// Partial word match
-			phraseWords := strings.Fields(phraseUpper)
-			trackWords := strings.Fields(trackUpper)
-
 			matchedWords := 0
 			for _, pw := range phraseWords {
 				for _, tw := range trackWords {
@@ -471,8 +485,6 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedT
 	}
 
 	// Word order similarity bonus (LCS)
-	phraseWords := strings.Fields(phraseUpper)
-	trackWords := strings.Fields(trackUpper)
 	lcsLength := lcs(phraseWords, trackWords)
 	if lcsLength >= 2 && len(phraseWords) > 0 {
 		orderBonus := (float64(lcsLength) / float64(len(phraseWords))) * 10.0
@@ -496,8 +508,13 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedT
 		// No popularity bonus, strict matching
 		return baseScore + artistBonus*0.5
 	case matcher.ModeSmart:
-		// Slight popularity preference
-		return baseScore + popularityBonus*0.3 + artistBonus*0.5
+		// Slight popularity preference, but accuracy matters more
+		accuracyWeight := baseScore / 100.0
+		if accuracyWeight < 0.5 {
+			// Poor match — don't boost with popularity
+			return baseScore + artistBonus*0.3
+		}
+		return baseScore + popularityBonus*0.2 + artistBonus*0.3
 	case matcher.ModeChaos:
 		// More weight on popularity + some randomness for variety
 		return baseScore + popularityBonus*0.5 + artistBonus + float64(time.Now().UnixNano()%10)*0.5
@@ -513,7 +530,6 @@ func lcs(a, b []string) int {
 		return 0
 	}
 
-	// Use DP with space optimization (two rows)
 	prev := make([]int, n+1)
 	curr := make([]int, n+1)
 
@@ -529,9 +545,7 @@ func lcs(a, b []string) int {
 				}
 			}
 		}
-		// Swap rows
 		prev, curr = curr, prev
-		// Clear curr for next iteration
 		for k := range curr {
 			curr[k] = 0
 		}
