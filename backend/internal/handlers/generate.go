@@ -108,22 +108,46 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 		}
 	}
 
-	// If no results and input is Indonesian, translate to English and retry
+	// If no results and input is Indonesian, search original text first
+	// Spotify has many Indonesian songs - search with original words
 	if len(tracks) == 0 && matcher.IsIndonesian(text) {
-		translated := matcher.TranslateIndonesian(text)
-		if translated != normalized {
-			// Search the FULL translated phrase first (better results)
-			engSearcher := func(phrase string) (*matcher.Track, float64) {
-				return h.searchAndScore(phrase, mode, nil)
+		// First try searching the original Indonesian text directly
+		origSearcher := func(phrase string) (*matcher.Track, float64) {
+			return h.searchAndScore(phrase, mode, nil)
+		}
+		
+		// Try full original phrase first
+		if track, score := origSearcher(normalized); track != nil && score > 40 {
+			tracks = []matcher.Track{*track}
+		} else {
+			// Fall back to word-by-word on original text
+			origWords := matcher.SplitWords(normalized)
+			var origSelectedTitles []string
+			origWordSearcher := func(phrase string) (*matcher.Track, float64) {
+				return h.searchAndScore(phrase, mode, origSelectedTitles)
 			}
-			if track, score := engSearcher(translated); track != nil && score > 40 {
-				tracks = []matcher.Track{*track}
+			if mode == matcher.ModeExact {
+				tracks = matcher.FindOptimalExact(origWords, origWordSearcher, mode)
 			} else {
-				// Try full original phrase
-				if track, score := searcher(normalized); track != nil && score > 40 {
+				tracks = matcher.FindOptimalSegmentation(origWords, origWordSearcher, mode)
+			}
+			for _, t := range tracks {
+				if t.Title != "[unavailable]" {
+					origSelectedTitles = append(origSelectedTitles, strings.ToUpper(t.Title))
+				}
+			}
+		}
+		
+		// If still no results, try translated English
+		if len(tracks) == 0 {
+			translated := matcher.TranslateIndonesian(text)
+			if translated != normalized {
+				engSearcher := func(phrase string) (*matcher.Track, float64) {
+					return h.searchAndScore(phrase, mode, nil)
+				}
+				if track, score := engSearcher(translated); track != nil && score > 40 {
 					tracks = []matcher.Track{*track}
 				} else {
-					// Fall back to word-by-word on translated text
 					engWords := matcher.SplitWords(translated)
 					var engSelectedTitles []string
 					engWordSearcher := func(phrase string) (*matcher.Track, float64) {

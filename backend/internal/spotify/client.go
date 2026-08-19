@@ -13,7 +13,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
+
+func isEnglish(text string) bool {
+	for _, r := range text {
+		if r > unicode.MaxASCII && !unicode.IsSpace(r) && !unicode.IsPunct(r) {
+			return false
+		}
+	}
+	return true
+}
 
 type Client struct {
 	clientID     string
@@ -107,9 +117,9 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	token := c.accessToken
 	c.mu.RUnlock()
 
-	// Use exact phrase matching for multi-word queries, keyword for single words
+	// Use exact phrase matching for English, keyword for non-English
 	var searchQuery string
-	if strings.Contains(query, " ") {
+	if strings.Contains(query, " ") && isEnglish(query) {
 		searchQuery = "\"" + query + "\""
 	} else {
 		searchQuery = query
