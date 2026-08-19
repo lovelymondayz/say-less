@@ -95,7 +95,13 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 		return h.searchAndScore(phrase, mode, selectedTitles)
 	}
 
-	tracks := matcher.FindOptimalSegmentation(words, searcher, mode)
+	var tracks []matcher.Track
+	if mode == matcher.ModeExact {
+		// Use the strict phrase-first exact matcher
+		tracks = matcher.FindOptimalExact(words, searcher, mode)
+	} else {
+		tracks = matcher.FindOptimalSegmentation(words, searcher, mode)
+	}
 
 	// Update selected titles after segmentation
 	for _, t := range tracks {
