@@ -451,17 +451,9 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedT
 	phraseWords := strings.Fields(phraseUpper)
 	trackWords := strings.Fields(trackUpper)
 
-	// For single-word phrases, require exact word match (not substring)
+	// For single-word phrases, require substring match (any occurrence)
 	if len(phraseWords) == 1 {
-		word := phraseWords[0]
-		found := false
-		for _, tw := range trackWords {
-			if tw == word {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !strings.Contains(trackUpper, phraseUpper) {
 			return 0 // Reject — track doesn't contain the word
 		}
 	}

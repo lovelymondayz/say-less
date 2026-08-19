@@ -107,7 +107,14 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	token := c.accessToken
 	c.mu.RUnlock()
 
-	encodedQuery := url.QueryEscape(query)
+	// Use exact phrase matching for multi-word queries, keyword for single words
+	var searchQuery string
+	if strings.Contains(query, " ") {
+		searchQuery = "\"" + query + "\""
+	} else {
+		searchQuery = query
+	}
+	encodedQuery := url.QueryEscape(searchQuery)
 	apiURL := fmt.Sprintf("https://api.spotify.com/v1/search?q=%s&type=track&limit=%d", encodedQuery, limit)
 
 	req, err := http.NewRequest("GET", apiURL, nil)
