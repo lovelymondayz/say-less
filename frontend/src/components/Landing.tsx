@@ -24,24 +24,23 @@ function useTypingAnimation(examples: string[], enabled: boolean) {
     if (!enabled) return
 
     const currentExample = examples[exampleIdx]
-    let timeout: ReturnType<typeof setTimeout>
 
     if (!isDeleting) {
       // Typing
       if (displayText.length < currentExample.length) {
-        timeout = setTimeout(() => {
+        timeoutRef.current = setTimeout(() => {
           setDisplayText(currentExample.slice(0, displayText.length + 1))
         }, 80 + Math.random() * 40)
       } else {
         // Pause before deleting
-        timeout = setTimeout(() => {
+        timeoutRef.current = setTimeout(() => {
           setIsDeleting(true)
         }, 2000)
       }
     } else {
       // Deleting
       if (displayText.length > 0) {
-        timeout = setTimeout(() => {
+        timeoutRef.current = setTimeout(() => {
           setDisplayText(displayText.slice(0, -1))
         }, 30 + Math.random() * 20)
       } else {
@@ -50,8 +49,9 @@ function useTypingAnimation(examples: string[], enabled: boolean) {
       }
     }
 
-    timeoutRef.current = timeout
-    return () => clearTimeout(timeout)
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    }
   }, [displayText, isDeleting, exampleIdx, enabled, examples])
 
   return displayText
