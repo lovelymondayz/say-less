@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,63 +145,78 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	// Retry with backoff on 429
+	var tracks []Track
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("spotify search error %d: %s", resp.StatusCode, string(body))
-	}
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == 429 {
+			// Rate limited - wait and retry
+			retryAfter := resp.Header.Get("Retry-After")
+			if retryAfter != "" {
+				seconds, _ := strconv.Atoi(retryAfter)
+				time.Sleep(time.Duration(seconds) * time.Second)
+			} else {
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+			}
+			continue
+		}
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("spotify search error %d: %s", resp.StatusCode, string(body))
+		}
 
-	var rawResp struct {
-		Tracks struct {
-			Items []struct {
-				ID         string `json:"id"`
-				Name       string `json:"name"`
-				Popularity int    `json:"popularity"`
-				Artists    []struct {
+		var rawResp struct {
+			Tracks struct {
+				Items []struct {
+					ID         string `json:"id"`
 					Name       string `json:"name"`
 					Popularity int    `json:"popularity"`
-				} `json:"artists"`
-				Album struct {
-					Name   string `json:"name"`
-					Images []struct {
-						URL string `json:"url"`
-					} `json:"images"`
-				} `json:"album"`
-				PreviewURL *string `json:"preview_url"`
-			} `json:"items"`
-		} `json:"tracks"`
-	}
+					Artists    []struct {
+						Name       string `json:"name"`
+						Popularity int    `json:"popularity"`
+					} `json:"artists"`
+					Album struct {
+						Name   string `json:"name"`
+						Images []struct {
+							URL string `json:"url"`
+						} `json:"images"`
+					} `json:"album"`
+					PreviewURL *string `json:"preview_url"`
+				} `json:"items"`
+			} `json:"tracks"`
+		}
 
-	if err := json.Unmarshal(body, &rawResp); err != nil {
-		return nil, err
-	}
+		if err := json.Unmarshal(body, &rawResp); err != nil {
+			return nil, err
+		}
 
-	var tracks []Track
-	for _, item := range rawResp.Tracks.Items {
-		track := Track{
-			ID:         item.ID,
-			Name:       item.Name,
-			Popularity: item.Popularity,
+		for _, item := range rawResp.Tracks.Items {
+			track := Track{
+				ID:         item.ID,
+				Name:       item.Name,
+				Popularity: item.Popularity,
+			}
+			if len(item.Artists) > 0 {
+				track.Artist = item.Artists[0].Name
+				track.ArtistPopular = item.Artists[0].Popularity
+			}
+			if item.Album.Name != "" {
+				track.Album = item.Album.Name
+			}
+			if len(item.Album.Images) > 0 {
+				track.Image = item.Album.Images[0].URL
+			}
+			if item.PreviewURL != nil {
+				track.Preview = *item.PreviewURL
+			}
+			tracks = append(tracks, track)
 		}
-		if len(item.Artists) > 0 {
-			track.Artist = item.Artists[0].Name
-			track.ArtistPopular = item.Artists[0].Popularity
-		}
-		if item.Album.Name != "" {
-			track.Album = item.Album.Name
-		}
-		if len(item.Album.Images) > 0 {
-			track.Image = item.Album.Images[0].URL
-		}
-		if item.PreviewURL != nil {
-			track.Preview = *item.PreviewURL
-		}
-		tracks = append(tracks, track)
+		break
 	}
 
 	// Cache results
