@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 )
@@ -157,8 +158,9 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 				continue
 			}
 
-			// Strong length bonus — prefer longer phrases
-			lengthBonus := float64(phraseLen * phraseLen) * 10.0
+			// Strong length bonus — prefer longer phrases exponentially
+			// This ensures "I MISS YOU" (1 phrase) beats "I" + "MISS" + "YOU" (3 words)
+			lengthBonus := math.Pow(2.0, float64(phraseLen)) * 20.0
 
 			switch mode {
 			case ModeExact:
