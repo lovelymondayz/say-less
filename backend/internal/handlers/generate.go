@@ -108,6 +108,28 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 		}
 	}
 
+	// If no results and input is Indonesian, translate to English and retry
+	if len(tracks) == 0 && matcher.IsIndonesian(text) {
+		translated := matcher.TranslateIndonesian(text)
+		if translated != normalized {
+			engWords := matcher.SplitWords(translated)
+			var engSelectedTitles []string
+			engSearcher := func(phrase string) (*matcher.Track, float64) {
+				return h.searchAndScore(phrase, mode, engSelectedTitles)
+			}
+			if mode == matcher.ModeExact {
+				tracks = matcher.FindOptimalExact(engWords, engSearcher, mode)
+			} else {
+				tracks = matcher.FindOptimalSegmentation(engWords, engSearcher, mode)
+			}
+			for _, t := range tracks {
+				if t.Title != "[unavailable]" {
+					engSelectedTitles = append(engSelectedTitles, strings.ToUpper(t.Title))
+				}
+			}
+		}
+	}
+
 	// Semantic fallback: if all tracks are single-word matches, try semantic for whole phrase
 	if len(tracks) > 0 && len(tracks) == len(words) && mode == matcher.ModeSmart {
 		semanticTrack, semanticScore := h.semanticFallback(text, mode, selectedTitles)
