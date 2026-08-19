@@ -6,11 +6,8 @@ import (
 
 // Indonesian to English translation dictionary for common words
 var indonesianDict = map[string]string{
-	// Pronouns
 	"AKU": "I", "SAYA": "I", "KAMU": "YOU", "DIA": "HE", "MEREKA": "THEY",
 	"KITA": "WE", "KAMI": "WE", "INI": "THIS", "ITU": "THAT",
-	
-	// Verbs
 	"SUKA": "LIKE", "CINTA": "LOVE", "BENCI": "HATE", "MAU": "WANT",
 	"BISA": "CAN", "HARUS": "MUST", "ADA": "THERE", "PERGI": "GO",
 	"PULANG": "HOME", "DATANG": "COME", "LIHAT": "SEE", "DENGAR": "HEAR",
@@ -32,40 +29,33 @@ var indonesianDict = map[string]string{
 	"SUSAH": "HARD", "MURAH": "CHEAP", "MAHAL": "EXPENSIVE", "GRATIS": "FREE",
 	"BARU": "NEW", "LAMA": "OLD", "PERTAMA": "FIRST", "TERAKHIR": "LAST",
 	"SEKARANG": "NOW", "KEMUDIAN": "THEN", "NANTI": "LATER", "TADI": "EARLY",
-	"TERLAMBAT": "LATE", "SELALU": "ALWAYS", "TIDAK": "NOT", "YA": "YES",
-	"MUNGKIN": "MAYBE", "BANYAK": "MUCH", "SEDIKIT": "LITTLE", "LAGI": "AGAIN",
-	"BANGET": "VERY", "SANGAT": "VERY", "TERLALU": "TOO", "KURANG": "LESS",
-	"LEBIH": "MORE", "PALING": "MOST", "SETIDAKNYA": "AT LEAST", "SEKITAR": "AROUND",
+	"TERLAMBAT": "LATE", "SELALU": "ALWAYS", "TIDAK": "NOT", "TDK": "NOT",
+	"YA": "YES", "MUNGKIN": "MAYBE", "BANYAK": "MUCH", "SEDIKIT": "LITTLE",
+	"LEBIH": "MORE", "KURANG": "LESS", "PALING": "MOST",
 	"SEBELUM": "BEFORE", "SESUDAH": "AFTER", "SELAMA": "DURING", "TANPA": "WITHOUT",
 	"DENGAN": "WITH", "UNTUK": "FOR", "DARI": "FROM", "KE": "TO", "DI": "AT",
 	"PADA": "ON", "DALAM": "IN", "LUAR": "OUT", "ATAS": "ABOVE", "BAWAH": "BELOW",
 	"DEPAN": "FRONT", "BELAKANG": "BACK", "SAMPAI": "UNTIL", "ANTARA": "BETWEEN",
 	"ADALAH": "IS", "MENJADI": "BECOME", "MEMPUNYAI": "HAVE", "MENGGUNAKAN": "USE",
-	
-	// Emotions
 	"SENANG": "HAPPY", "SEDIN": "SAD", "MARAH": "ANGRY",
 	"TAKUT": "SCARED", "CEMBURU": "JEALOUS", "MALU": "SHY", "BANGGA": "PROUD",
 	"KECEWA": "DISAPPOINTED", "BINGUNG": "CONFUSED", "LELAH": "TIRED", "SEHAT": "HEALTHY",
 	"SAKIT": "SICK", "LAPAR": "HUNGRY", "HAUS": "THIRSTY", "PUSING": "DIZZY",
-	
-	// Relationships
 	"SAHABAT": "FRIEND", "KELUARGA": "FAMILY", "AYAH": "FATHER", "IBU": "MOTHER",
 	"ANAK": "CHILD", "ADIK": "YOUNGER", "KAKAK": "OLDER", "PACAR": "GIRLFRIEND",
 	"SUAMI": "HUSBAND", "ISTRI": "WIFE", "TEMAN": "FRIEND", "MUSUH": "ENEMY",
-	
-	// Time
 	"HARI": "DAY", "MALAM": "NIGHT", "PAGI": "MORNING", "SIANG": "AFTERNOON",
 	"SORE": "EVENING", "BESOK": "TOMORROW", "KEMARIN": "YESTERDAY", "MINGGU": "WEEK",
 	"BULAN": "MONTH", "TAHUN": "YEAR", "JAM": "HOUR", "MENIT": "MINUTE",
 	"DETIK": "SECOND",
+	"SAMA": "WITH", "SAYANG": "LOVE", "RINDU": "MISS", "KENANG": "REMEMBER",
+	"MANIS": "SWEET",
+	"TENTANG": "ABOUT",
 }
 
-// TranslateIndonesian translates Indonesian words to English.
-// Untranslated words are kept as-is.
 func TranslateIndonesian(text string) string {
 	words := strings.Fields(strings.ToUpper(text))
 	translated := make([]string, len(words))
-	
 	for i, word := range words {
 		if eng, ok := indonesianDict[word]; ok {
 			translated[i] = eng
@@ -73,11 +63,9 @@ func TranslateIndonesian(text string) string {
 			translated[i] = word
 		}
 	}
-	
 	return strings.Join(translated, " ")
 }
 
-// IsIndonesian checks if text contains Indonesian words
 func IsIndonesian(text string) bool {
 	words := strings.Fields(strings.ToUpper(text))
 	for _, word := range words {
