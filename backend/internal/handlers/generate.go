@@ -411,29 +411,49 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedT
 	phraseUpper := strings.ToUpper(strings.TrimSpace(phrase))
 	trackUpper := strings.ToUpper(strings.TrimSpace(track.Name))
 
-	// Phrase containment filter: track title must contain the phrase (or vice versa)
+	// Phrase containment filter: track title must contain the phrase as words
 	phraseWords := strings.Fields(phraseUpper)
 	trackWords := strings.Fields(trackUpper)
 
-	// Check if track title contains the full phrase
-	containsPhrase := strings.Contains(trackUpper, phraseUpper)
-	// Check if phrase contains the track title
-	phraseContains := strings.Contains(phraseUpper, trackUpper)
-
-	// For multi-word phrases, require containment
-	if len(phraseWords) > 1 && !containsPhrase && !phraseContains {
-		// Check if most words match
-		matchedWords := 0
-		for _, pw := range phraseWords {
-			for _, tw := range trackWords {
-				if pw == tw {
-					matchedWords++
-					break
-				}
+	// For single-word phrases, require exact word match (not substring)
+	if len(phraseWords) == 1 {
+		word := phraseWords[0]
+		found := false
+		for _, tw := range trackWords {
+			if tw == word {
+				found = true
+				break
 			}
 		}
-		if matchedWords < len(phraseWords)/2 {
-			return 0 // Reject — track doesn't contain enough of the phrase
+		if !found {
+			return 0 // Reject — track doesn't contain the word
+		}
+	}
+
+	// For multi-word phrases, check if track title contains all phrase words in order
+	if len(phraseWords) > 1 {
+		// Check if track title contains the full phrase
+		containsPhrase := strings.Contains(trackUpper, phraseUpper)
+		// Check if phrase contains the track title
+		phraseContains := strings.Contains(phraseUpper, trackUpper)
+
+		if !containsPhrase && !phraseContains {
+			// Check if most words match in order
+			matchedWords := 0
+			trackIdx := 0
+			for _, pw := range phraseWords {
+				for trackIdx < len(trackWords) {
+					if trackWords[trackIdx] == pw {
+						matchedWords++
+						trackIdx++
+						break
+					}
+					trackIdx++
+				}
+			}
+			if matchedWords < len(phraseWords)/2+1 {
+				return 0 // Reject — track doesn't contain enough of the phrase in order
+			}
 		}
 	}
 
@@ -455,9 +475,9 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedT
 
 		if stripPunct(phraseUpper) == stripPunct(trackUpper) {
 			baseScore = 95.0
-		} else if containsPhrase {
+		} else if strings.Contains(trackUpper, phraseUpper) {
 			baseScore = 85.0 - float64(len(trackUpper)-len(phraseUpper))*0.5
-		} else if phraseContains {
+		} else if strings.Contains(phraseUpper, trackUpper) {
 			baseScore = 75.0
 		} else {
 			// Partial word match
