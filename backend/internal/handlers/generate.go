@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -19,8 +18,13 @@ type Handler struct {
 	container *models.Container
 }
 
-func New(c *models.Container) *Handler {
+func NewHandler(c *models.Container) *Handler {
 	return &Handler{container: c}
+}
+
+// New is an alias for NewHandler for backward compatibility
+func New(c *models.Container) *Handler {
+	return NewHandler(c)
 }
 
 type GenerateRequest struct {
@@ -28,43 +32,37 @@ type GenerateRequest struct {
 	Mode string `json:"mode"`
 }
 
-type GenerateResponse struct {
-	OriginalText   string         `json:"original_text"`
-	NormalizedText string         `json:"normalized_text"`
-	Mode           string         `json:"mode"`
-	Tracks         []matcher.Track `json:"tracks"`
-	Reconstructed  string         `json:"reconstructed"`
-	Coverage       float64        `json:"coverage"`
-	Caption        string         `json:"caption"`
-	ShareID        string         `json:"share_id,omitempty"`
-}
-
-type SaveShareRequest struct {
-	OriginalText   string         `json:"original_text"`
-	NormalizedText string         `json:"normalized_text"`
-	Mode           string         `json:"mode"`
-	Tracks         []matcher.Track `json:"tracks"`
-	Reconstructed  string         `json:"reconstructed"`
-	Coverage       float64        `json:"coverage"`
-	Caption        string         `json:"caption"`
-}
-
-type PlaylistRequest struct {
-	TrackIDs []string `json:"track_ids" binding:"required"`
-	Token    string   `json:"token" binding:"required"`
-	Name     string   `json:"name"`
+type RegenerateRequest struct {
+	OriginalText string `json:"original_text"`
+	Mode         string `json:"mode"`
+	ExcludeIDs   []string `json:"exclude_ids"`
 }
 
 type SearchTrackRequest struct {
-	Phrase string `json:"phrase" binding:"required"`
-	Mode   string `json:"mode"`
+	Query string `json:"query" binding:"required"`
 }
 
-type RegenerateRequest struct {
-	Text          string         `json:"text" binding:"required"`
-	Mode          string         `json:"mode"`
-	Strategy      string         `json:"strategy"`
-	CurrentTracks []matcher.Track `json:"current_tracks"`
+type GenerateResponse struct {
+	OriginalText   string        `json:"original_text"`
+	NormalizedText string        `json:"normalized_text"`
+	Mode           string        `json:"mode"`
+	Tracks         []matcher.Track `json:"tracks"`
+	Reconstructed  string        `json:"reconstructed"`
+	Coverage       float64       `json:"coverage"`
+	Caption        string        `json:"caption"`
+}
+
+type ShareRequest struct {
+	OriginalText  string `json:"original_text"`
+	Mode          string `json:"mode"`
+	Tracks        []matcher.Track `json:"tracks"`
+	Reconstructed string `json:"reconstructed"`
+	Caption       string `json:"caption"`
+	Coverage      float64 `json:"coverage"`
+}
+
+func (h *Handler) Health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func (h *Handler) Generate(c *gin.Context) {
@@ -79,21 +77,69 @@ func (h *Handler) Generate(c *gin.Context) {
 		mode = matcher.ModeSmart
 	}
 
-	result := h.generateWithMode(req.Text, mode)
-
-	c.JSON(http.StatusOK, result)
+	resp := h.generateWithMode(req.Text, mode)
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateResponse {
 	normalized := matcher.Normalize(text)
 	words := matcher.SplitWords(normalized)
 
-	var selectedTitles []string
-
-	searcher := func(phrase string) (*matcher.Track, float64) {
-		return h.searchAndScore(phrase, mode, selectedTitles)
+	if len(words) == 0 {
+		return GenerateResponse{
+			OriginalText:   text,
+			NormalizedText: normalized,
+			Mode:           string(mode),
+			Tracks:         []matcher.Track{},
+			Reconstructed:  "",
+			Coverage:       0,
+			Caption:        "No matches found. Try a different phrase!",
+		}
 	}
 
+	// Searcher function: searches Spotify for a phrase and returns all results
+	searcher := func(phrase string) ([]matcher.Track, float64) {
+		spotifyTracks, err := h.container.Spotify.SearchTracks(phrase, 10)
+		if err != nil {
+			log.Printf("Search error for '%s': %v", phrase, err)
+			return nil, 0
+		}
+
+		var tracks []matcher.Track
+		for _, st := range spotifyTracks {
+			track := matcher.Track{
+				ID:            st.ID,
+				Title:         st.Name,
+				Artist:        st.Artist,
+				Album:         st.Album,
+				ImageURL:      st.Image,
+				PreviewURL:    st.Preview,
+				Popularity:    st.Popularity,
+				ArtistPopular: st.ArtistPopular,
+				MatchScore:    scoreMatch(phrase, st, mode),
+				MatchedPhrase: phrase,
+			}
+
+			// Determine match type
+			phraseUpper := strings.ToUpper(phrase)
+			trackUpper := strings.ToUpper(st.Name)
+			if phraseUpper == trackUpper {
+				track.MatchType = matcher.MatchExact
+			} else if strings.Contains(trackUpper, phraseUpper) {
+				track.MatchType = matcher.MatchPhrase
+			} else if strings.Contains(phraseUpper, trackUpper) {
+				track.MatchType = matcher.MatchPhrase
+			} else {
+				track.MatchType = matcher.MatchPartial
+			}
+
+			tracks = append(tracks, track)
+		}
+
+		return tracks, 0
+	}
+
+	// Use the matcher's DP to find best segmentation
 	var tracks []matcher.Track
 	if mode == matcher.ModeExact {
 		tracks = matcher.FindOptimalExact(words, searcher, mode)
@@ -101,83 +147,16 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 		tracks = matcher.FindOptimalSegmentation(words, searcher, mode)
 	}
 
-	// Update selected titles after segmentation
-	for _, t := range tracks {
-		if t.Title != "[unavailable]" {
-			selectedTitles = append(selectedTitles, strings.ToUpper(t.Title))
-		}
-	}
-
-	// If no results and input is Indonesian, search original text first
-	// Spotify has many Indonesian songs - search with original words
+	// If no results and input is Indonesian, try translated English
 	if len(tracks) == 0 && matcher.IsIndonesian(text) {
-		// First try searching the original Indonesian text directly
-		origSearcher := func(phrase string) (*matcher.Track, float64) {
-			return h.searchAndScore(phrase, mode, nil)
-		}
-		
-		// Try full original phrase first
-		if track, score := origSearcher(normalized); track != nil && score > 40 {
-			tracks = []matcher.Track{*track}
-		} else {
-			// Fall back to word-by-word on original text
-			origWords := matcher.SplitWords(normalized)
-			var origSelectedTitles []string
-			origWordSearcher := func(phrase string) (*matcher.Track, float64) {
-				return h.searchAndScore(phrase, mode, origSelectedTitles)
-			}
+		translated := matcher.TranslateIndonesian(text)
+		if translated != normalized {
+			transWords := matcher.SplitWords(translated)
 			if mode == matcher.ModeExact {
-				tracks = matcher.FindOptimalExact(origWords, origWordSearcher, mode)
+				tracks = matcher.FindOptimalExact(transWords, searcher, mode)
 			} else {
-				tracks = matcher.FindOptimalSegmentation(origWords, origWordSearcher, mode)
+				tracks = matcher.FindOptimalSegmentation(transWords, searcher, mode)
 			}
-			for _, t := range tracks {
-				if t.Title != "[unavailable]" {
-					origSelectedTitles = append(origSelectedTitles, strings.ToUpper(t.Title))
-				}
-			}
-		}
-		
-		// If still no results and input is Indonesian, try English translation
-		if len(tracks) == 0 && matcher.IsIndonesian(text) {
-			translated := matcher.TranslateIndonesian(text)
-			if translated != normalized {
-				// Search translated text
-				tranSearcher := func(phrase string) (*matcher.Track, float64) {
-					return h.searchAndScore(phrase, mode, nil)
-				}
-			
-				// Try full translated phrase
-				if track, score := tranSearcher(translated); track != nil && score > 40 {
-					tracks = []matcher.Track{*track}
-				} else {
-					// Fall back to word-by-word on translated text
-					tranWords := matcher.SplitWords(translated)
-					var tranSelectedTitles []string
-					tranWordSearcher := func(phrase string) (*matcher.Track, float64) {
-						return h.searchAndScore(phrase, mode, tranSelectedTitles)
-					}
-					if mode == matcher.ModeExact {
-						tracks = matcher.FindOptimalExact(tranWords, tranWordSearcher, mode)
-					} else {
-						tracks = matcher.FindOptimalSegmentation(tranWords, tranWordSearcher, mode)
-					}
-					for _, t := range tracks {
-						if t.Title != "[unavailable]" {
-							tranSelectedTitles = append(tranSelectedTitles, strings.ToUpper(t.Title))
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Semantic fallback: if all tracks are single-word matches, try semantic for whole phrase
-	if len(tracks) > 0 && len(tracks) == len(words) && mode == matcher.ModeSmart {
-		semanticTrack, semanticScore := h.semanticFallback(text, mode, selectedTitles)
-		if semanticTrack != nil && semanticScore > 50 {
-			// Replace the word-by-word result with the semantic match
-			tracks = []matcher.Track{*semanticTrack}
 		}
 	}
 
@@ -212,6 +191,84 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 	}
 }
 
+func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode) float64 {
+	phraseUpper := strings.ToUpper(strings.TrimSpace(phrase))
+	trackUpper := strings.ToUpper(strings.TrimSpace(track.Name))
+
+	if phraseUpper == trackUpper {
+		return 100.0
+	}
+
+	// Check if track title contains the phrase
+	if strings.Contains(trackUpper, phraseUpper) {
+		return 85.0 - float64(len(trackUpper)-len(phraseUpper))*0.5
+	}
+
+	// Check if phrase contains the track title
+	if strings.Contains(phraseUpper, trackUpper) {
+		return 75.0
+	}
+
+	// Word-level matching
+	phraseWords := strings.Fields(phraseUpper)
+	trackWords := strings.Fields(trackUpper)
+	matchedWords := 0
+	for _, pw := range phraseWords {
+		for _, tw := range trackWords {
+			if pw == tw {
+				matchedWords++
+				break
+			}
+		}
+	}
+
+	if len(phraseWords) == 0 {
+		return 0
+	}
+
+	wordCoverage := float64(matchedWords) / float64(len(phraseWords))
+	if mode == matcher.ModeChaos {
+		return 30.0 + wordCoverage*20.0
+	}
+
+	if wordCoverage >= 0.7 {
+		return 60.0 + wordCoverage*15.0
+	} else if wordCoverage >= 0.4 {
+		return 40.0 + wordCoverage*15.0
+	}
+
+	return wordCoverage * 30.0
+}
+
+func calculateCoverage(words []string, tracks []matcher.Track, normalized string) float64 {
+	if len(words) == 0 {
+		return 0
+	}
+
+	covered := make(map[string]bool)
+	for _, t := range tracks {
+		titleUpper := strings.ToUpper(t.Title)
+		for _, w := range words {
+			if strings.Contains(titleUpper, w) {
+				covered[w] = true
+			}
+		}
+	}
+
+	return float64(len(covered)) / float64(len(words)) * 100.0
+}
+
+func generateCaption() string {
+	captions := []string{
+		"Your feelings are now a playlist.",
+		"My music taste is now speaking for me.",
+		"Spotify understood the assignment.",
+		"Type it. We'll playlist it.",
+		"I typed my thoughts and Spotify made them worse.",
+	}
+	return captions[time.Now().UnixNano()%int64(len(captions))]
+}
+
 func (h *Handler) Regenerate(c *gin.Context) {
 	var req RegenerateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -224,17 +281,8 @@ func (h *Handler) Regenerate(c *gin.Context) {
 		mode = matcher.ModeSmart
 	}
 
-	if req.Strategy == "chaos" {
-		mode = matcher.ModeChaos
-	} else if req.Strategy == "accurate" || req.Strategy == "improve" {
-		mode = matcher.ModeExact
-	} else if req.Strategy == "popular" {
-		mode = matcher.ModeSmart
-	}
-
-	result := h.generateWithMode(req.Text, mode)
-
-	c.JSON(http.StatusOK, result)
+	resp := h.generateWithMode(req.OriginalText, mode)
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) SearchTrack(c *gin.Context) {
@@ -244,29 +292,37 @@ func (h *Handler) SearchTrack(c *gin.Context) {
 		return
 	}
 
-	mode := matcher.Mode(req.Mode)
-	if mode == "" {
-		mode = matcher.ModeSmart
-	}
-
-	track, score := h.searchAndScore(req.Phrase, mode, nil)
-	if track == nil {
-		c.JSON(http.StatusOK, gin.H{"track": nil, "message": "No match found for this phrase"})
+	tracks, err := h.container.Spotify.SearchTracks(req.Query, 10)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Search failed"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"track": track, "score": score})
+	var results []matcher.Track
+	for _, st := range tracks {
+		results = append(results, matcher.Track{
+			ID:         st.ID,
+			Title:      st.Name,
+			Artist:     st.Artist,
+			Album:      st.Album,
+			ImageURL:   st.Image,
+			PreviewURL: st.Preview,
+			Popularity: st.Popularity,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"tracks": results})
 }
 
 func (h *Handler) SaveShare(c *gin.Context) {
-	var req SaveShareRequest
+	var req ShareRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	shareID := spotify.RandomShareID()
 	tracksJSON, _ := json.Marshal(req.Tracks)
+	shareID := spotify.RandomShareID()
 
 	_, err := h.container.DB.Exec(context.Background(),
 		`INSERT INTO generations (share_id, original_text, mode, tracks, reconstructed, caption, accuracy)
@@ -287,13 +343,14 @@ func (h *Handler) GetShare(c *gin.Context) {
 		return
 	}
 
-	var gen models.Generation
+	var originalText, mode, reconstructed, caption string
 	var tracksJSON []byte
+	var accuracy float64
+	var createdAt time.Time
 	err := h.container.DB.QueryRow(context.Background(),
-		`SELECT id, share_id, original_text, mode, tracks, reconstructed, caption, accuracy, created_at
+		`SELECT original_text, mode, tracks, reconstructed, caption, accuracy, created_at
 		 FROM generations WHERE share_id = $1`, shareID).
-		Scan(&gen.ID, &gen.ShareID, &gen.OriginalText, &gen.Mode, &tracksJSON,
-			&gen.Reconstructed, &gen.Caption, &gen.Accuracy, &gen.CreatedAt)
+		Scan(&originalText, &mode, &tracksJSON, &reconstructed, &caption, &accuracy, &createdAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Share not found"})
 		return
@@ -303,13 +360,13 @@ func (h *Handler) GetShare(c *gin.Context) {
 	json.Unmarshal(tracksJSON, &tracks)
 
 	c.JSON(http.StatusOK, gin.H{
-		"original_text":  gen.OriginalText,
-		"mode":           gen.Mode,
+		"original_text":  originalText,
+		"mode":           mode,
 		"tracks":         tracks,
-		"reconstructed":  gen.Reconstructed,
-		"caption":        gen.Caption,
-		"accuracy":       gen.Accuracy,
-		"created_at":     gen.CreatedAt,
+		"reconstructed":  reconstructed,
+		"caption":        caption,
+		"accuracy":       accuracy,
+		"created_at":     createdAt,
 	})
 }
 
@@ -328,7 +385,7 @@ func (h *Handler) SpotifyCallback(c *gin.Context) {
 
 	accessToken, refreshToken, err := h.container.Spotify.ExchangeCode(code)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token exchange failed"})
 		return
 	}
 
@@ -338,399 +395,33 @@ func (h *Handler) SpotifyCallback(c *gin.Context) {
 	})
 }
 
+type CreatePlaylistRequest struct {
+	Name     string   `json:"name" binding:"required"`
+	TrackIDs []string `json:"track_ids" binding:"required"`
+}
+
 func (h *Handler) CreatePlaylist(c *gin.Context) {
-	var req PlaylistRequest
+	var req CreatePlaylistRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if req.Name == "" {
-		req.Name = "Say Less — My Playlist"
-	}
-
-	result, err := h.container.Spotify.CreatePlaylist(req.Token, req.Name, req.TrackIDs)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	token := c.GetHeader("X-Spotify-Token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing Spotify token"})
 		return
 	}
 
-	c.JSON(http.StatusOK, result)
-}
-
-// searchAndScore searches Spotify for the phrase and scores the best track.
-// It uses phrase containment filtering — only tracks whose title contains the phrase are accepted.
-func (h *Handler) searchAndScore(phrase string, mode matcher.Mode, selectedTitles []string) (*matcher.Track, float64) {
-	tracks, err := h.container.Spotify.SearchTracks(phrase, 10)
+	result, err := h.container.Spotify.CreatePlaylist(token, req.Name, req.TrackIDs)
 	if err != nil {
-		log.Printf("Spotify search error for '%s': %v", phrase, err)
-		return nil, 0
-	}
-	if len(tracks) == 0 {
-		return h.semanticFallback(phrase, mode, selectedTitles)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Playlist creation failed"})
+		return
 	}
 
-	var bestTrack *matcher.Track
-	bestScore := 0.0
-
-	for _, t := range tracks {
-		score := scoreMatch(phrase, t, mode, selectedTitles)
-		if score > bestScore {
-			bestScore = score
-			mt := scoreToMatchType(score)
-			bestTrack = &matcher.Track{
-				ID:            t.ID,
-				Title:         t.Name,
-				Artist:        t.Artist,
-				Album:         t.Album,
-				ImageURL:      t.Image,
-				PreviewURL:    t.Preview,
-				MatchType:     mt,
-				MatchScore:    score,
-				MatchedPhrase: phrase,
-				Popularity:    t.Popularity,
-				ArtistPopular: t.ArtistPopular,
-			}
-		}
-	}
-
-	return bestTrack, bestScore
-}
-
-// semanticFallback tries to find tracks matching semantic concepts related to the phrase.
-func (h *Handler) semanticFallback(phrase string, mode matcher.Mode, selectedTitles []string) (*matcher.Track, float64) {
-	keywords := matcher.FindSemanticKeywords(phrase)
-	if len(keywords) == 0 {
-		return nil, 0
-	}
-
-	var bestTrack *matcher.Track
-	bestScore := 0.0
-
-	limit := 5
-	if len(keywords) < 5 {
-		limit = len(keywords)
-	}
-
-	for i := 0; i < limit; i++ {
-		kw := keywords[i]
-		tracks, err := h.container.Spotify.SearchTracks(kw, 5)
-		if err != nil || len(tracks) == 0 {
-			continue
-		}
-
-		for _, t := range tracks {
-			semanticScore := 45.0 + float64(t.Popularity)*0.2
-
-			if isRepetitiveTitle(t.Name, selectedTitles) {
-				semanticScore -= 30
-			}
-
-			if semanticScore > bestScore {
-				bestScore = semanticScore
-				bestTrack = &matcher.Track{
-					ID:            t.ID,
-					Title:         t.Name,
-					Artist:        t.Artist,
-					Album:         t.Album,
-					ImageURL:      t.Image,
-					PreviewURL:    t.Preview,
-					MatchType:     matcher.MatchSemantic,
-					MatchScore:    semanticScore,
-					MatchedPhrase: phrase,
-					Popularity:    t.Popularity,
-					ArtistPopular: t.ArtistPopular,
-				}
-			}
-		}
-	}
-
-	return bestTrack, bestScore
-}
-
-// isRepetitiveTitle checks if the title is similar to already-selected titles.
-func isRepetitiveTitle(title string, selectedTitles []string) bool {
-	titleUpper := strings.ToUpper(title)
-	titleWords := strings.Fields(titleUpper)
-	if len(titleWords) < 2 {
-		return false
-	}
-
-	for _, sel := range selectedTitles {
-		selWords := strings.Fields(sel)
-		matchCount := 0
-		for i := 0; i < len(titleWords) && i < len(selWords) && i < 3; i++ {
-			if titleWords[i] == selWords[i] {
-				matchCount++
-			}
-		}
-		if matchCount >= 2 {
-			return true
-		}
-	}
-	return false
-}
-
-func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedTitles []string) float64 {
-	phraseUpper := strings.ToUpper(strings.TrimSpace(phrase))
-	trackUpper := strings.ToUpper(strings.TrimSpace(track.Name))
-
-	// Phrase containment filter: track title must contain the phrase as words
-	phraseWords := strings.Fields(phraseUpper)
-	trackWords := strings.Fields(trackUpper)
-
-	// For single-word phrases, require substring match (any occurrence)
-	if len(phraseWords) == 1 {
-		if !strings.Contains(trackUpper, phraseUpper) {
-			return 0 // Reject — track doesn't contain the word
-		}
-	}
-
-	// For multi-word phrases, check if track title contains all phrase words in order
-	if len(phraseWords) > 1 {
-		// Check if track title contains the full phrase
-		containsPhrase := strings.Contains(trackUpper, phraseUpper)
-		// Check if phrase contains the track title
-		phraseContains := strings.Contains(phraseUpper, trackUpper)
-
-		if !containsPhrase && !phraseContains {
-			// Check if most words match in order
-			matchedWords := 0
-			trackIdx := 0
-			for _, pw := range phraseWords {
-				for trackIdx < len(trackWords) {
-					if trackWords[trackIdx] == pw {
-						matchedWords++
-						trackIdx++
-						break
-					}
-					trackIdx++
-				}
-			}
-			if matchedWords < len(phraseWords)/2+1 {
-				return 0 // Reject — track doesn't contain enough of the phrase in order
-			}
-		}
-	}
-
-	baseScore := 0.0
-
-	// Exact match
-	if phraseUpper == trackUpper {
-		baseScore = 100.0
-	} else {
-		stripPunct := func(s string) string {
-			var b strings.Builder
-			for _, r := range s {
-				if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == ' ' {
-					b.WriteRune(r)
-				}
-			}
-			return strings.Join(strings.Fields(b.String()), " ")
-		}
-
-		if stripPunct(phraseUpper) == stripPunct(trackUpper) {
-			baseScore = 95.0
-		} else if strings.Contains(trackUpper, phraseUpper) {
-			baseScore = 85.0 - float64(len(trackUpper)-len(phraseUpper))*0.5
-		} else if strings.Contains(phraseUpper, trackUpper) {
-			baseScore = 75.0
-		} else {
-			// Partial word match
-			matchedWords := 0
-			for _, pw := range phraseWords {
-				for _, tw := range trackWords {
-					if pw == tw {
-						matchedWords++
-						break
-					}
-				}
-			}
-
-			if len(phraseWords) > 0 {
-				wordCoverage := float64(matchedWords) / float64(len(phraseWords))
-				if wordCoverage >= 0.7 {
-					baseScore = 60.0 + wordCoverage*15.0
-				} else if wordCoverage >= 0.4 {
-					baseScore = 40.0 + wordCoverage*15.0
-				} else {
-					baseScore = 10.0
-				}
-			}
-		}
-	}
-
-	// Word order similarity bonus (LCS)
-	lcsLength := lcs(phraseWords, trackWords)
-	if lcsLength >= 2 && len(phraseWords) > 0 {
-		orderBonus := (float64(lcsLength) / float64(len(phraseWords))) * 10.0
-		baseScore += orderBonus
-	}
-
-	// Repetitive title avoidance
-	if isRepetitiveTitle(track.Name, selectedTitles) {
-		baseScore -= 30.0
-	}
-
-	// Artist recognizability boost (0-5 points)
-	artistBonus := float64(track.ArtistPopular) * 0.05
-
-	// Popularity bonus (0-20 points based on track popularity 0-100)
-	popularityBonus := float64(track.Popularity) * 0.2
-
-	// Mode-specific adjustments
-	switch mode {
-	case matcher.ModeExact:
-		// No popularity bonus, strict matching
-		return baseScore + artistBonus*0.5
-	case matcher.ModeSmart:
-		// Slight popularity preference, but accuracy matters more
-		accuracyWeight := baseScore / 100.0
-		if accuracyWeight < 0.5 {
-			// Poor match — don't boost with popularity
-			return baseScore + artistBonus*0.3
-		}
-		return baseScore + popularityBonus*0.2 + artistBonus*0.3
-	case matcher.ModeChaos:
-		// More weight on popularity + some randomness for variety
-		return baseScore + popularityBonus*0.5 + artistBonus + float64(time.Now().UnixNano()%10)*0.5
-	}
-
-	return baseScore
-}
-
-// lcs computes the length of the longest common subsequence between two string slices.
-func lcs(a, b []string) int {
-	m, n := len(a), len(b)
-	if m == 0 || n == 0 {
-		return 0
-	}
-
-	prev := make([]int, n+1)
-	curr := make([]int, n+1)
-
-	for i := 1; i <= m; i++ {
-		for j := 1; j <= n; j++ {
-			if a[i-1] == b[j-1] {
-				curr[j] = prev[j-1] + 1
-			} else {
-				if curr[j-1] > prev[j] {
-					curr[j] = curr[j-1]
-				} else {
-					curr[j] = prev[j]
-				}
-			}
-		}
-		prev, curr = curr, prev
-		for k := range curr {
-			curr[k] = 0
-		}
-	}
-
-	return prev[n]
-}
-
-func scoreToMatchType(score float64) matcher.MatchType {
-	switch {
-	case score >= 95:
-		return matcher.MatchExact
-	case score >= 80:
-		return matcher.MatchPhrase
-	case score >= 60:
-		return matcher.MatchPartial
-	case score >= 40:
-		return matcher.MatchSemantic
-	default:
-		return matcher.MatchWord
-	}
-}
-
-func calculateCoverage(inputWords []string, tracks []matcher.Track, originalText string) float64 {
-	if len(inputWords) == 0 {
-		return 0
-	}
-	covered := 0
-	for _, t := range tracks {
-		phraseWords := strings.Fields(strings.ToUpper(t.MatchedPhrase))
-		covered += len(phraseWords)
-	}
-	ratio := float64(covered) / float64(len(inputWords))
-	coverage := math.Min(ratio, 1.0) * 100
-
-	// Semantic reconstruction check: if key emotional words are missing, reduce coverage
-	if originalText != "" && len(tracks) > 0 {
-		keyWords := extractKeyWords(originalText)
-		if len(keyWords) > 0 {
-			allTrackText := strings.Builder{}
-			for _, t := range tracks {
-				allTrackText.WriteString(strings.ToUpper(t.Title))
-				allTrackText.WriteString(" ")
-			}
-			trackText := allTrackText.String()
-
-			missingCount := 0
-			for _, kw := range keyWords {
-				if !strings.Contains(trackText, kw) {
-					missingCount++
-				}
-			}
-
-			if missingCount > 0 {
-				missingRatio := float64(missingCount) / float64(len(keyWords))
-				if missingRatio > 0.5 {
-					coverage *= 0.8
-				}
-			}
-		}
-	}
-
-	return coverage
-}
-
-// extractKeyWords extracts important emotional/content words (not stop words).
-func extractKeyWords(text string) []string {
-	stopWords := map[string]bool{
-		"THE": true, "A": true, "AN": true, "AND": true, "OR": true,
-		"BUT": true, "IN": true, "ON": true, "AT": true, "TO": true,
-		"FOR": true, "OF": true, "WITH": true, "BY": true, "IS": true,
-		"IT": true, "I": true, "YOU": true, "HE": true, "SHE": true,
-		"WE": true, "THEY": true, "ME": true, "HIM": true, "HER": true,
-		"US": true, "THEM": true, "MY": true, "YOUR": true, "HIS": true,
-		"AM": true, "ARE": true, "WAS": true, "WERE": true, "BE": true,
-		"DO": true, "DOES": true, "DID": true, "HAVE": true, "HAS": true,
-		"HAD": true, "WILL": true, "WOULD": true, "COULD": true, "SHOULD": true,
-		"SO": true, "NOT": true, "NO": true, "IF": true, "THAT": true,
-		"THIS": true, "WHAT": true, "WHICH": true, "WHO": true, "WHEN": true,
-		"HOW": true, "WHY": true, "ALL": true, "CAN": true,
-	}
-
-	words := strings.Fields(strings.ToUpper(text))
-	var keyWords []string
-	seen := make(map[string]bool)
-	for _, w := range words {
-		if !stopWords[w] && !seen[w] && len(w) > 1 {
-			keyWords = append(keyWords, w)
-			seen[w] = true
-		}
-	}
-	return keyWords
-}
-
-func generateCaption() string {
-	captions := []string{
-		"Type it. We'll playlist it.",
-		"Your thoughts, but make it music.",
-		"Spotify understood the assignment.",
-		"I typed my thoughts and Spotify made them worse.",
-		"My music taste is now speaking for me.",
-		"I said one thing. Spotify had another idea.",
-		"Wait... these song titles actually say what I typed.",
-		"Your feelings are now a playlist.",
-	}
-	idx := time.Now().UnixNano() % int64(len(captions))
-	return captions[idx]
-}
-
-func (h *Handler) Health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{
+		"playlist_id":  result.ID,
+		"playlist_url": result.URL,
+		"name":         result.Name,
+	})
 }
