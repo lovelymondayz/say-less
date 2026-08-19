@@ -6,11 +6,7 @@ services:
     container_name: sayless-backend
     ports:
       - "8086:8086"
-    environment:
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/sayless?sslmode=disable
-      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
-      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      - PORT=8086
+    env_file: ./backend/.env
     depends_on:
       db:
         condition: service_healthy

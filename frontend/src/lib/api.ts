@@ -50,3 +50,26 @@ export async function createPlaylist(token: string, name: string, trackIDs: stri
   }
   return res.json()
 }
+
+export async function searchTrack(phrase: string, mode: string): Promise<any> {
+  const res = await fetch(`${API_BASE}/api/search-track`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phrase, mode }),
+  })
+  if (!res.ok) throw new Error('Failed to search track')
+  return res.json()
+}
+
+export async function regeneratePlaylist(text: string, mode: string, strategy: string): Promise<GenerateResult> {
+  const res = await fetch(`${API_BASE}/api/regenerate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, mode, strategy }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || 'Failed to regenerate')
+  }
+  return res.json()
+}

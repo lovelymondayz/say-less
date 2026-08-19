@@ -47,6 +47,10 @@ func (c *Client) EnsureToken() error {
 		return nil
 	}
 
+	if c.clientID == "" || c.clientSecret == "" {
+		return fmt.Errorf("spotify credentials not set")
+	}
+
 	data := url.Values{}
 	data.Set("grant_type", "client_credentials")
 
@@ -84,12 +88,13 @@ func (c *Client) EnsureToken() error {
 }
 
 type Track struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Artist  string `json:"artist"`
-	Album   string `json:"album"`
-	Image   string `json:"image"`
-	Preview string `json:"preview_url"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Artist     string `json:"artist"`
+	Album      string `json:"album"`
+	Image      string `json:"image"`
+	Preview    string `json:"preview_url"`
+	Popularity int    `json:"popularity"`
 }
 
 func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
@@ -124,9 +129,10 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	var rawResp struct {
 		Tracks struct {
 			Items []struct {
-				ID      string `json:"id"`
-				Name    string `json:"name"`
-				Artists []struct {
+				ID         string `json:"id"`
+				Name       string `json:"name"`
+				Popularity int    `json:"popularity"`
+				Artists    []struct {
 					Name string `json:"name"`
 				} `json:"artists"`
 				Album struct {
@@ -147,8 +153,9 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	var tracks []Track
 	for _, item := range rawResp.Tracks.Items {
 		track := Track{
-			ID:   item.ID,
-			Name: item.Name,
+			ID:         item.ID,
+			Name:       item.Name,
+			Popularity: item.Popularity,
 		}
 		if len(item.Artists) > 0 {
 			track.Artist = item.Artists[0].Name

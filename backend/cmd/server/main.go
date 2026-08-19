@@ -17,7 +17,7 @@ import (
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://postgres:postgres@localhost:5437/sayless?sslmode=disable"
+		dbURL = "postgres://postgres:postgres@db:5432/sayless?sslmode=disable"
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -57,6 +57,8 @@ func main() {
 
 	r.GET("/api/health", h.Health)
 	r.POST("/api/generate", h.Generate)
+	r.POST("/api/regenerate", h.Regenerate)
+	r.POST("/api/search-track", h.SearchTrack)
 	r.POST("/api/share", h.SaveShare)
 	r.GET("/api/share/:id", h.GetShare)
 	r.GET("/api/spotify/login", h.SpotifyLogin)

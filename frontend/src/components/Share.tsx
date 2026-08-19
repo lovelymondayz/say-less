@@ -54,32 +54,39 @@ export default function Share({ shareID, onReset }: Props) {
           </h2>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
-          className="glass p-6 mb-8 text-center">
-          <div className="text-sm text-gray-500 mb-2">They typed:</div>
-          <div className="text-2xl md:text-3xl font-bold text-white">"{result.original_text}"</div>
-        </motion.div>
-
+        {/* Share card / collage */}
         <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-          transition={{ delay: 0.3 }} className="glass p-6 mb-8 text-center border-spotify/30">
-          <div className="text-sm text-spotify mb-2">Spotify said:</div>
-          <div className="text-2xl md:text-3xl font-bold text-spotify">{result.reconstructed}</div>
+          transition={{ delay: 0.2 }} className="glass p-8 mb-8 relative overflow-hidden">
+          {/* Background collage of album art */}
+          <div className="absolute inset-0 opacity-20">
+            <div className="grid grid-cols-4 gap-1 h-full">
+              {result.tracks.slice(0, 8).map((track, i) => (
+                <div key={i} className="bg-dark-500 relative overflow-hidden">
+                  {track.image_url && (
+                    <img src={track.image_url} alt="" className="w-full h-full object-cover blur-sm" />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+          
+          <div className="relative z-10 text-center">
+            <div className="text-sm text-gray-400 mb-2">I typed:</div>
+            <div className="text-2xl md:text-3xl font-bold text-white mb-4">"{result.original_text}"</div>
+            <div className="text-sm text-spotify mb-2">🎧 And Spotify said:</div>
+            <div className="text-2xl md:text-3xl font-bold text-spotify mb-4">{result.reconstructed}</div>
+            
+            <div className="flex justify-center gap-6 text-sm text-gray-400">
+              <span>{result.tracks.length} tracks</span>
+              <span>•</span>
+              <span>{Math.round(result.coverage)}% coverage</span>
+            </div>
+          </div>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.4 }}
-          className="flex justify-center gap-8 mb-10">
-          <div className="text-center">
-            <div className="text-3xl font-black text-white">{result.tracks.length}</div>
-            <div className="text-gray-500 text-sm">Tracks</div>
-          </div>
-          <div className="text-center">
-            <div className="text-3xl font-black text-white">{Math.round(result.coverage)}%</div>
-            <div className="text-gray-500 text-sm">Coverage</div>
-          </div>
-        </motion.div>
-
+        {/* Track list */}
         <div className="space-y-3 mb-10">
-          {result.tracks.map((track, i) => <TrackCard key={track.id} track={track} index={i} />)}
+          {result.tracks.map((track, i) => <TrackCard key={track.id} track={track} index={i} onReplace={() => {}} />)}
         </div>
 
         {result.caption && (

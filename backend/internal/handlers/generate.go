@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -39,19 +40,31 @@ type GenerateResponse struct {
 }
 
 type SaveShareRequest struct {
-	OriginalText  string         `json:"original_text"`
-	NormalizedText string        `json:"normalized_text"`
-	Mode          string         `json:"mode"`
-	Tracks        []matcher.Track `json:"tracks"`
-	Reconstructed string         `json:"reconstructed"`
-	Coverage      float64        `json:"coverage"`
-	Caption       string         `json:"caption"`
+	OriginalText   string         `json:"original_text"`
+	NormalizedText string         `json:"normalized_text"`
+	Mode           string         `json:"mode"`
+	Tracks         []matcher.Track `json:"tracks"`
+	Reconstructed  string         `json:"reconstructed"`
+	Coverage       float64        `json:"coverage"`
+	Caption        string         `json:"caption"`
 }
 
 type PlaylistRequest struct {
 	TrackIDs []string `json:"track_ids" binding:"required"`
 	Token    string   `json:"token" binding:"required"`
 	Name     string   `json:"name"`
+}
+
+type SearchTrackRequest struct {
+	Phrase string `json:"phrase" binding:"required"`
+	Mode   string `json:"mode"`
+}
+
+type RegenerateRequest struct {
+	Text          string         `json:"text" binding:"required"`
+	Mode          string         `json:"mode"`
+	Strategy      string         `json:"strategy"`
+	CurrentTracks []matcher.Track `json:"current_tracks"`
 }
 
 func (h *Handler) Generate(c *gin.Context) {
@@ -66,7 +79,13 @@ func (h *Handler) Generate(c *gin.Context) {
 		mode = matcher.ModeSmart
 	}
 
-	normalized := matcher.Normalize(req.Text)
+	result := h.generateWithMode(req.Text, mode)
+
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateResponse {
+	normalized := matcher.Normalize(text)
 	words := matcher.SplitWords(normalized)
 
 	searcher := func(phrase string) (*matcher.Track, float64) {
@@ -76,16 +95,15 @@ func (h *Handler) Generate(c *gin.Context) {
 	tracks := matcher.FindOptimalSegmentation(words, searcher, mode)
 
 	if len(tracks) == 0 {
-		c.JSON(http.StatusOK, GenerateResponse{
-			OriginalText:   req.Text,
+		return GenerateResponse{
+			OriginalText:   text,
 			NormalizedText: normalized,
 			Mode:           string(mode),
 			Tracks:         []matcher.Track{},
 			Reconstructed:  "",
 			Coverage:       0,
 			Caption:        "No matches found. Try a different phrase!",
-		})
-		return
+		}
 	}
 
 	var phrases []string
@@ -94,17 +112,65 @@ func (h *Handler) Generate(c *gin.Context) {
 	}
 	reconstructed := strings.Join(phrases, " → ")
 	coverage := calculateCoverage(words, tracks)
-	caption := generateCaption(coverage)
+	caption := generateCaption()
 
-	c.JSON(http.StatusOK, GenerateResponse{
-		OriginalText:   req.Text,
+	return GenerateResponse{
+		OriginalText:   text,
 		NormalizedText: normalized,
 		Mode:           string(mode),
 		Tracks:         tracks,
 		Reconstructed:  reconstructed,
 		Coverage:       coverage,
 		Caption:        caption,
-	})
+	}
+}
+
+func (h *Handler) Regenerate(c *gin.Context) {
+	var req RegenerateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	mode := matcher.Mode(req.Mode)
+	if mode == "" {
+		mode = matcher.ModeSmart
+	}
+
+	// If strategy changes mode, apply it
+	if req.Strategy == "chaos" {
+		mode = matcher.ModeChaos
+	} else if req.Strategy == "accurate" || req.Strategy == "improve" {
+		mode = matcher.ModeExact
+	} else if req.Strategy == "popular" {
+		mode = matcher.ModeSmart
+	}
+
+	// For "improve" and "popular", adjust scoring
+	result := h.generateWithMode(req.Text, mode)
+
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) SearchTrack(c *gin.Context) {
+	var req SearchTrackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	mode := matcher.Mode(req.Mode)
+	if mode == "" {
+		mode = matcher.ModeSmart
+	}
+
+	track, score := h.searchAndScore(req.Phrase, mode)
+	if track == nil {
+		c.JSON(http.StatusOK, gin.H{"track": nil, "message": "No match found for this phrase"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"track": track, "score": score})
 }
 
 func (h *Handler) SaveShare(c *gin.Context) {
@@ -208,8 +274,12 @@ func (h *Handler) CreatePlaylist(c *gin.Context) {
 }
 
 func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Track, float64) {
-	tracks, err := h.container.Spotify.SearchTracks(phrase, 5)
-	if err != nil || len(tracks) == 0 {
+	tracks, err := h.container.Spotify.SearchTracks(phrase, 10)
+	if err != nil {
+		log.Printf("Spotify search error for '%s': %v", phrase, err)
+		return nil, 0
+	}
+	if len(tracks) == 0 {
 		return nil, 0
 	}
 
@@ -217,7 +287,7 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Tra
 	bestScore := 0.0
 
 	for _, t := range tracks {
-		score := scoreMatch(phrase, t.Name, mode)
+		score := scoreMatch(phrase, t, mode)
 		if score > bestScore {
 			bestScore = score
 			mt := scoreToMatchType(score)
@@ -231,6 +301,7 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Tra
 				MatchType:     mt,
 				MatchScore:    score,
 				MatchedPhrase: phrase,
+				Popularity:    t.Popularity,
 			}
 		}
 	}
@@ -238,60 +309,77 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Tra
 	return bestTrack, bestScore
 }
 
-func scoreMatch(phrase, trackTitle string, mode matcher.Mode) float64 {
+func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode) float64 {
 	phraseUpper := strings.ToUpper(strings.TrimSpace(phrase))
-	trackUpper := strings.ToUpper(strings.TrimSpace(trackTitle))
+	trackUpper := strings.ToUpper(strings.TrimSpace(track.Name))
 
+	baseScore := 0.0
+
+	// Exact match
 	if phraseUpper == trackUpper {
-		return 100.0
-	}
+		baseScore = 100.0
+	} else {
+		stripPunct := func(s string) string {
+			var b strings.Builder
+			for _, r := range s {
+				if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == ' ' {
+					b.WriteRune(r)
+				}
+			}
+			return strings.Join(strings.Fields(b.String()), " ")
+		}
 
-	stripPunct := func(s string) string {
-		var b strings.Builder
-		for _, r := range s {
-			if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == ' ' {
-				b.WriteRune(r)
+		if stripPunct(phraseUpper) == stripPunct(trackUpper) {
+			baseScore = 95.0
+		} else if strings.Contains(trackUpper, phraseUpper) {
+			baseScore = 85.0 - float64(len(trackUpper)-len(phraseUpper))*0.5
+		} else if strings.Contains(phraseUpper, trackUpper) {
+			baseScore = 75.0
+		} else {
+			// Partial word match
+			phraseWords := strings.Fields(phraseUpper)
+			trackWords := strings.Fields(trackUpper)
+
+			matchedWords := 0
+			for _, pw := range phraseWords {
+				for _, tw := range trackWords {
+					if pw == tw {
+						matchedWords++
+						break
+					}
+				}
+			}
+
+			if len(phraseWords) > 0 {
+				wordCoverage := float64(matchedWords) / float64(len(phraseWords))
+				if wordCoverage >= 0.7 {
+					baseScore = 60.0 + wordCoverage*15.0
+				} else if wordCoverage >= 0.4 {
+					baseScore = 40.0 + wordCoverage*15.0
+				} else {
+					baseScore = 10.0
+				}
 			}
 		}
-		return strings.Join(strings.Fields(b.String()), " ")
 	}
 
-	if stripPunct(phraseUpper) == stripPunct(trackUpper) {
-		return 95.0
+	// Popularity bonus (0-20 points based on track popularity 0-100)
+	popularityBonus := float64(track.Popularity) * 0.2
+
+	// Mode-specific adjustments
+	switch mode {
+	case matcher.ModeExact:
+		// No popularity bonus, strict matching
+		return baseScore
+	case matcher.ModeSmart:
+		// Slight popularity preference
+		return baseScore + popularityBonus*0.3
+	case matcher.ModeChaos:
+		// More weight on popularity + some randomness for variety
+		return baseScore + popularityBonus*0.5 + float64(time.Now().UnixNano()%10)*0.5
 	}
 
-	if strings.Contains(trackUpper, phraseUpper) {
-		return 85.0 - float64(len(trackUpper)-len(phraseUpper))*0.5
-	}
-
-	if strings.Contains(phraseUpper, trackUpper) {
-		return 75.0
-	}
-
-	phraseWords := strings.Fields(phraseUpper)
-	trackWords := strings.Fields(trackUpper)
-
-	matchedWords := 0
-	for _, pw := range phraseWords {
-		for _, tw := range trackWords {
-			if pw == tw {
-				matchedWords++
-				break
-			}
-		}
-	}
-
-	if len(phraseWords) > 0 {
-		wordCoverage := float64(matchedWords) / float64(len(phraseWords))
-		if wordCoverage >= 0.7 {
-			return 60.0 + wordCoverage*15.0
-		}
-		if wordCoverage >= 0.4 {
-			return 40.0 + wordCoverage*15.0
-		}
-	}
-
-	return 10.0
+	return baseScore
 }
 
 func scoreToMatchType(score float64) matcher.MatchType {
@@ -322,7 +410,7 @@ func calculateCoverage(inputWords []string, tracks []matcher.Track) float64 {
 	return math.Min(ratio, 1.0) * 100
 }
 
-func generateCaption(coverage float64) string {
+func generateCaption() string {
 	captions := []string{
 		"Type it. We'll playlist it.",
 		"Your thoughts, but make it music.",
