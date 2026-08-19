@@ -32,6 +32,8 @@ type Client struct {
 	expiresAt    time.Time
 	mu           sync.RWMutex
 	httpClient   *http.Client
+	cache        map[string][]Track
+	cacheMu      sync.RWMutex
 }
 
 func NewClient() *Client {
@@ -39,6 +41,7 @@ func NewClient() *Client {
 		clientID:     os.Getenv("SPOTIFY_CLIENT_ID"),
 		clientSecret: os.Getenv("SPOTIFY_CLIENT_SECRET"),
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		cache:        make(map[string][]Track),
 	}
 }
 
@@ -112,6 +115,14 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	if err := c.EnsureToken(); err != nil {
 		return nil, err
 	}
+
+	// Check cache first
+	c.cacheMu.RLock()
+	if cached, ok := c.cache[query]; ok {
+		c.cacheMu.RUnlock()
+		return cached, nil
+	}
+	c.cacheMu.RUnlock()
 
 	c.mu.RLock()
 	token := c.accessToken
@@ -191,6 +202,11 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 		}
 		tracks = append(tracks, track)
 	}
+
+	// Cache results
+	c.cacheMu.Lock()
+	c.cache[query] = tracks
+	c.cacheMu.Unlock()
 
 	return tracks, nil
 }
