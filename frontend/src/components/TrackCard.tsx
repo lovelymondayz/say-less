@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Track } from '../lib/types'
-import { searchTrack } from '../lib/api'
+import { searchTrack, regeneratePlaylist } from '../lib/api'
 
 interface Props {
   track: Track
   index: number
   onReplace: (track: Track) => void
+  reconstructed?: string
 }
 
 const matchColors: Record<string, string> = {
@@ -25,11 +26,13 @@ const matchLabels: Record<string, string> = {
   word: 'Word',
 }
 
-export default function TrackCard({ track, index, onReplace }: Props) {
+export default function TrackCard({ track, index, onReplace, reconstructed }: Props) {
   const [showControls, setShowControls] = useState(false)
   const [replacing, setReplacing] = useState(false)
   const [alternatives, setAlternatives] = useState<Track[]>([])
   const [showAlt, setShowAlt] = useState(false)
+  const [searching, setSearching] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
 
   const handleReplace = async () => {
     setReplacing(true)
@@ -46,6 +49,54 @@ export default function TrackCard({ track, index, onReplace }: Props) {
       setAlternatives([])
     } finally {
       setReplacing(false)
+    }
+  }
+
+  const handleSearch = async () => {
+    setSearching(true)
+    setShowAlt(true)
+    try {
+      // Search with different modes to get more alternatives
+      const modes = ['smart', 'chaos', 'exact']
+      const allTracks: Track[] = []
+      for (const mode of modes) {
+        try {
+          const res = await searchTrack(track.matched_phrase, mode)
+          if (res.track && res.track.id !== track.id) {
+            allTracks.push(res.track)
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+      // Deduplicate by ID
+      const seen = new Set<string>()
+      const unique = allTracks.filter(t => {
+        if (seen.has(t.id)) return false
+        seen.add(t.id)
+        return true
+      })
+      setAlternatives(unique.slice(0, 5))
+    } catch (e) {
+      setAlternatives([])
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const handleRegenerate = async () => {
+    setRegenerating(true)
+    try {
+      // Use the regenerate API with strategy "all" for this phrase
+      const newResult = await regeneratePlaylist(track.matched_phrase, 'smart', 'all')
+      if (newResult && newResult.tracks && newResult.tracks.length > 0) {
+        // Take the first track from the regenerated result
+        onReplace(newResult.tracks[0])
+      }
+    } catch (e) {
+      console.error('Regenerate failed:', e)
+    } finally {
+      setRegenerating(false)
     }
   }
 
@@ -110,6 +161,18 @@ export default function TrackCard({ track, index, onReplace }: Props) {
                 className="px-3 py-1 bg-dark-600 hover:bg-dark-500 border border-white/10 rounded-full text-xs text-gray-300 hover:text-white transition-all"
               >
                 {replacing ? '...' : 'Replace'}
+              </button>
+              <button
+                onClick={handleSearch}
+                className="px-3 py-1 bg-dark-600 hover:bg-dark-500 border border-white/10 rounded-full text-xs text-gray-300 hover:text-white transition-all"
+              >
+                {searching ? '...' : 'Search'}
+              </button>
+              <button
+                onClick={handleRegenerate}
+                className="px-3 py-1 bg-dark-600 hover:bg-dark-500 border border-white/10 rounded-full text-xs text-gray-300 hover:text-white transition-all"
+              >
+                {regenerating ? '...' : 'Regenerate'}
               </button>
             </motion.div>
           )}

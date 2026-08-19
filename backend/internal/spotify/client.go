@@ -88,13 +88,14 @@ func (c *Client) EnsureToken() error {
 }
 
 type Track struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Artist     string `json:"artist"`
-	Album      string `json:"album"`
-	Image      string `json:"image"`
-	Preview    string `json:"preview_url"`
-	Popularity int    `json:"popularity"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Artist        string `json:"artist"`
+	ArtistPopular int    `json:"artist_popularity"`
+	Album         string `json:"album"`
+	Image         string `json:"image"`
+	Preview       string `json:"preview_url"`
+	Popularity    int    `json:"popularity"`
 }
 
 func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
@@ -133,7 +134,8 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 				Name       string `json:"name"`
 				Popularity int    `json:"popularity"`
 				Artists    []struct {
-					Name string `json:"name"`
+					Name       string `json:"name"`
+					Popularity int    `json:"popularity"`
 				} `json:"artists"`
 				Album struct {
 					Name   string `json:"name"`
@@ -159,6 +161,7 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 		}
 		if len(item.Artists) > 0 {
 			track.Artist = item.Artists[0].Name
+			track.ArtistPopular = item.Artists[0].Popularity
 		}
 		if item.Album.Name != "" {
 			track.Album = item.Album.Name

@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 )
@@ -34,6 +35,7 @@ type Track struct {
 	MatchScore    float64   `json:"match_score"`
 	MatchedPhrase string    `json:"matched_phrase"`
 	Popularity    int       `json:"popularity"`
+	ArtistPopular int       `json:"artist_popularity"`
 }
 
 type Result struct {
@@ -93,10 +95,11 @@ func Phrase(words []string, start, end int) string {
 }
 
 type DPScore struct {
-	Score    float64
-	Phrase   string
-	Track    *Track
-	PrevIdx  int
+	Score      float64
+	Phrase     string
+	Track      *Track
+	PrevIdx    int
+	Unavailable bool
 }
 
 func FindOptimalSegmentation(words []string, searcher func(string) (*Track, float64), mode Mode) []Track {
@@ -145,9 +148,11 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 				dp[i].Phrase = phrase
 				dp[i].Track = track
 				dp[i].PrevIdx = j
+				dp[i].Unavailable = false
 			}
 		}
 
+		// Handle fallback cases when no valid segmentation found
 		if dp[i].PrevIdx == -1 && i > 0 {
 			lastValid := -1
 			for k := i - 1; k >= 0; k-- {
@@ -159,12 +164,22 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 			if lastValid >= 0 && lastValid < i {
 				phrase := Phrase(words, lastValid, i)
 				track, score := searcher(phrase)
-				if track != nil && score > 30 {
+				
+				if mode == ModeExact && (track == nil || score < 80) {
+					// Exact mode: mark segment as unavailable instead of falling back
+					totalScore := dp[lastValid].Score - 10 // penalty
+					dp[i].Score = totalScore
+					dp[i].Phrase = phrase
+					dp[i].Track = nil // Will be handled in backtracking
+					dp[i].PrevIdx = lastValid
+					dp[i].Unavailable = true
+				} else if track != nil && score > 30 {
 					totalScore := dp[lastValid].Score + score
 					dp[i].Score = totalScore
 					dp[i].Phrase = phrase
 					dp[i].Track = track
 					dp[i].PrevIdx = lastValid
+					dp[i].Unavailable = false
 				}
 			}
 		}
@@ -175,6 +190,25 @@ func FindOptimalSegmentation(words []string, searcher func(string) (*Track, floa
 	seen := make(map[string]bool)
 	
 	for idx > 0 {
+		if dp[idx].Unavailable {
+			// Insert placeholder for unavailable segment
+			placeholder := Track{
+				ID:            fmt.Sprintf("unavailable-%d", idx),
+				Title:         "[unavailable]",
+				Artist:        "",
+				Album:         "",
+				MatchType:     MatchPhrase,
+				MatchScore:    0,
+				MatchedPhrase: dp[idx].Phrase,
+				Popularity:    0,
+			}
+			if !seen[placeholder.ID] {
+				tracks = append(tracks, placeholder)
+				seen[placeholder.ID] = true
+			}
+			idx = dp[idx].PrevIdx
+			continue
+		}
 		if dp[idx].Track == nil {
 			idx--
 			continue

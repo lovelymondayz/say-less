@@ -13,6 +13,7 @@ export default function Share({ shareID, onReset }: Props) {
   const [result, setResult] = useState<GenerateResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [copiedLink, setCopiedLink] = useState(false)
 
   useEffect(() => {
     const fetchShare = async () => {
@@ -27,6 +28,13 @@ export default function Share({ shareID, onReset }: Props) {
     }
     fetchShare()
   }, [shareID])
+
+  const handleCopyLink = () => {
+    const url = `${window.location.origin}/s/${shareID}`
+    navigator.clipboard.writeText(url)
+    setCopiedLink(true)
+    setTimeout(() => setCopiedLink(false), 2000)
+  }
 
   if (loading) {
     return (
@@ -99,6 +107,9 @@ export default function Share({ shareID, onReset }: Props) {
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.7 }}
           className="flex flex-col sm:flex-row justify-center gap-4">
           <button onClick={onReset} className="btn-primary">Try It Yourself →</button>
+          <button onClick={handleCopyLink} className="btn-secondary">
+            {copiedLink ? 'Link Copied!' : '🔗 Copy Link'}
+          </button>
         </motion.div>
       </div>
     </div>

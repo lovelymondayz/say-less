@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { generatePlaylist } from '../lib/api'
 import { GenerateResult } from '../lib/types'
@@ -13,6 +13,50 @@ const EXAMPLES = [
   "I DON'T KNOW WHAT I'M DOING WITH MY LIFE",
 ]
 
+// Custom hook for typing animation
+function useTypingAnimation(examples: string[], enabled: boolean) {
+  const [displayText, setDisplayText] = useState('')
+  const [exampleIdx, setExampleIdx] = useState(0)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    if (!enabled) return
+
+    const currentExample = examples[exampleIdx]
+    let timeout: ReturnType<typeof setTimeout>
+
+    if (!isDeleting) {
+      // Typing
+      if (displayText.length < currentExample.length) {
+        timeout = setTimeout(() => {
+          setDisplayText(currentExample.slice(0, displayText.length + 1))
+        }, 80 + Math.random() * 40)
+      } else {
+        // Pause before deleting
+        timeout = setTimeout(() => {
+          setIsDeleting(true)
+        }, 2000)
+      }
+    } else {
+      // Deleting
+      if (displayText.length > 0) {
+        timeout = setTimeout(() => {
+          setDisplayText(displayText.slice(0, -1))
+        }, 30 + Math.random() * 20)
+      } else {
+        setIsDeleting(false)
+        setExampleIdx((prev) => (prev + 1) % examples.length)
+      }
+    }
+
+    timeoutRef.current = timeout
+    return () => clearTimeout(timeout)
+  }, [displayText, isDeleting, exampleIdx, enabled, examples])
+
+  return displayText
+}
+
 interface Props {
   onGenerated: (result: GenerateResult) => void
 }
@@ -24,6 +68,8 @@ export default function Landing({ onGenerated }: Props) {
   const [error, setError] = useState('')
   const [processing, setProcessing] = useState(false)
   const [placeholderIndex, setPlaceholderIndex] = useState(0)
+  const [isFocused, setIsFocused] = useState(false)
+  const typingText = useTypingAnimation(EXAMPLES, !isFocused && text.length === 0)
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -99,14 +145,28 @@ export default function Landing({ onGenerated }: Props) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.6 }}
           >
-            <input
-              type="text"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-              placeholder={EXAMPLES[placeholderIndex]}
-              className="w-full bg-dark-700/80 backdrop-blur-sm border border-white/20 rounded-2xl px-8 py-6 text-xl md:text-2xl text-white placeholder-gray-500 focus:outline-none input-glow transition-all"
-            />
+            <div className="relative">
+              <input
+                type="text"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+                onFocus={() => setIsFocused(true)}
+                onBlur={() => setIsFocused(false)}
+                placeholder={typingText || EXAMPLES[placeholderIndex]}
+                className="w-full bg-dark-700/80 backdrop-blur-sm border border-white/20 rounded-2xl px-8 py-6 text-xl md:text-2xl text-white placeholder-gray-500 focus:outline-none input-glow transition-all"
+              />
+              {/* Blinking cursor overlay */}
+              {typingText && (
+                <motion.span
+                  className="absolute left-8 top-1/2 -translate-y-1/2 text-xl md:text-2xl text-spotify pointer-events-none"
+                  animate={{ opacity: [1, 0, 1] }}
+                  transition={{ duration: 0.8, repeat: Infinity }}
+                >
+                  |
+                </motion.span>
+              )}
+            </div>
           </motion.div>
 
           <motion.div

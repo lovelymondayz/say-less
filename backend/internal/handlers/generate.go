@@ -88,11 +88,21 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 	normalized := matcher.Normalize(text)
 	words := matcher.SplitWords(normalized)
 
+	// Track selected titles for repetitive title avoidance
+	var selectedTitles []string
+
 	searcher := func(phrase string) (*matcher.Track, float64) {
-		return h.searchAndScore(phrase, mode)
+		return h.searchAndScore(phrase, mode, selectedTitles)
 	}
 
 	tracks := matcher.FindOptimalSegmentation(words, searcher, mode)
+
+	// Update selected titles after segmentation
+	for _, t := range tracks {
+		if t.Title != "[unavailable]" {
+			selectedTitles = append(selectedTitles, strings.ToUpper(t.Title))
+		}
+	}
 
 	if len(tracks) == 0 {
 		return GenerateResponse{
@@ -111,7 +121,7 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 		phrases = append(phrases, t.MatchedPhrase)
 	}
 	reconstructed := strings.Join(phrases, " → ")
-	coverage := calculateCoverage(words, tracks)
+	coverage := calculateCoverage(words, tracks, normalized)
 	caption := generateCaption()
 
 	return GenerateResponse{
@@ -164,7 +174,7 @@ func (h *Handler) SearchTrack(c *gin.Context) {
 		mode = matcher.ModeSmart
 	}
 
-	track, score := h.searchAndScore(req.Phrase, mode)
+	track, score := h.searchAndScore(req.Phrase, mode, nil)
 	if track == nil {
 		c.JSON(http.StatusOK, gin.H{"track": nil, "message": "No match found for this phrase"})
 		return
@@ -273,21 +283,24 @@ func (h *Handler) CreatePlaylist(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Track, float64) {
+// searchAndScore searches Spotify for the phrase and scores the best track.
+// It also performs semantic fallback when exact/phrase matching fails.
+func (h *Handler) searchAndScore(phrase string, mode matcher.Mode, selectedTitles []string) (*matcher.Track, float64) {
 	tracks, err := h.container.Spotify.SearchTracks(phrase, 10)
 	if err != nil {
 		log.Printf("Spotify search error for '%s': %v", phrase, err)
 		return nil, 0
 	}
 	if len(tracks) == 0 {
-		return nil, 0
+		// Semantic fallback: try related keywords
+		return h.semanticFallback(phrase, mode, selectedTitles)
 	}
 
 	var bestTrack *matcher.Track
 	bestScore := 0.0
 
 	for _, t := range tracks {
-		score := scoreMatch(phrase, t, mode)
+		score := scoreMatch(phrase, t, mode, selectedTitles)
 		if score > bestScore {
 			bestScore = score
 			mt := scoreToMatchType(score)
@@ -302,6 +315,70 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Tra
 				MatchScore:    score,
 				MatchedPhrase: phrase,
 				Popularity:    t.Popularity,
+				ArtistPopular: t.ArtistPopular,
+			}
+		}
+	}
+
+	// If no good match found, try semantic fallback
+	if bestScore < 40 {
+		semanticTrack, semanticScore := h.semanticFallback(phrase, mode, selectedTitles)
+		if semanticTrack != nil && semanticScore > bestScore {
+			return semanticTrack, semanticScore
+		}
+	}
+
+	return bestTrack, bestScore
+}
+
+// semanticFallback tries to find tracks matching semantic concepts related to the phrase.
+func (h *Handler) semanticFallback(phrase string, mode matcher.Mode, selectedTitles []string) (*matcher.Track, float64) {
+	keywords := matcher.FindSemanticKeywords(phrase)
+	if len(keywords) == 0 {
+		return nil, 0
+	}
+
+	var bestTrack *matcher.Track
+	bestScore := 0.0
+
+	// Try first 5 keywords
+	limit := 5
+	if len(keywords) < 5 {
+		limit = len(keywords)
+	}
+
+	for i := 0; i < limit; i++ {
+		kw := keywords[i]
+		tracks, err := h.container.Spotify.SearchTracks(kw, 5)
+		if err != nil || len(tracks) == 0 {
+			continue
+		}
+
+		for _, t := range tracks {
+			// Boost semantic matches so they rank above poor exact matches
+			// but below good exact matches
+			semanticScore := 45.0 + float64(t.Popularity)*0.2
+
+			// Check for repetitive titles
+			if isRepetitiveTitle(t.Name, selectedTitles) {
+				semanticScore -= 30
+			}
+
+			if semanticScore > bestScore {
+				bestScore = semanticScore
+				bestTrack = &matcher.Track{
+					ID:            t.ID,
+					Title:         t.Name,
+					Artist:        t.Artist,
+					Album:         t.Album,
+					ImageURL:      t.Image,
+					PreviewURL:    t.Preview,
+					MatchType:     matcher.MatchSemantic,
+					MatchScore:    semanticScore,
+					MatchedPhrase: phrase,
+					Popularity:    t.Popularity,
+					ArtistPopular: t.ArtistPopular,
+				}
 			}
 		}
 	}
@@ -309,7 +386,31 @@ func (h *Handler) searchAndScore(phrase string, mode matcher.Mode) (*matcher.Tra
 	return bestTrack, bestScore
 }
 
-func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode) float64 {
+// isRepetitiveTitle checks if the title is similar to already-selected titles.
+func isRepetitiveTitle(title string, selectedTitles []string) bool {
+	titleUpper := strings.ToUpper(title)
+	titleWords := strings.Fields(titleUpper)
+	if len(titleWords) < 2 {
+		return false
+	}
+
+	for _, sel := range selectedTitles {
+		selWords := strings.Fields(sel)
+		// Check if first 2-3 words match
+		matchCount := 0
+		for i := 0; i < len(titleWords) && i < len(selWords) && i < 3; i++ {
+			if titleWords[i] == selWords[i] {
+				matchCount++
+			}
+		}
+		if matchCount >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode, selectedTitles []string) float64 {
 	phraseUpper := strings.ToUpper(strings.TrimSpace(phrase))
 	trackUpper := strings.ToUpper(strings.TrimSpace(track.Name))
 
@@ -363,6 +464,23 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode) float64 {
 		}
 	}
 
+	// Word order similarity bonus (LCS)
+	phraseWords := strings.Fields(phraseUpper)
+	trackWords := strings.Fields(trackUpper)
+	lcsLength := lcs(phraseWords, trackWords)
+	if lcsLength >= 2 && len(phraseWords) > 0 {
+		orderBonus := (float64(lcsLength) / float64(len(phraseWords))) * 10.0
+		baseScore += orderBonus
+	}
+
+	// Repetitive title avoidance
+	if isRepetitiveTitle(track.Name, selectedTitles) {
+		baseScore -= 30.0
+	}
+
+	// Artist recognizability boost (0-5 points)
+	artistBonus := float64(track.ArtistPopular) * 0.05
+
 	// Popularity bonus (0-20 points based on track popularity 0-100)
 	popularityBonus := float64(track.Popularity) * 0.2
 
@@ -370,16 +488,50 @@ func scoreMatch(phrase string, track spotify.Track, mode matcher.Mode) float64 {
 	switch mode {
 	case matcher.ModeExact:
 		// No popularity bonus, strict matching
-		return baseScore
+		return baseScore + artistBonus*0.5
 	case matcher.ModeSmart:
 		// Slight popularity preference
-		return baseScore + popularityBonus*0.3
+		return baseScore + popularityBonus*0.3 + artistBonus*0.5
 	case matcher.ModeChaos:
 		// More weight on popularity + some randomness for variety
-		return baseScore + popularityBonus*0.5 + float64(time.Now().UnixNano()%10)*0.5
+		return baseScore + popularityBonus*0.5 + artistBonus + float64(time.Now().UnixNano()%10)*0.5
 	}
 
 	return baseScore
+}
+
+// lcs computes the length of the longest common subsequence between two string slices.
+func lcs(a, b []string) int {
+	m, n := len(a), len(b)
+	if m == 0 || n == 0 {
+		return 0
+	}
+
+	// Use DP with space optimization (two rows)
+	prev := make([]int, n+1)
+	curr := make([]int, n+1)
+
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if a[i-1] == b[j-1] {
+				curr[j] = prev[j-1] + 1
+			} else {
+				if curr[j-1] > prev[j] {
+					curr[j] = curr[j-1]
+				} else {
+					curr[j] = prev[j]
+				}
+			}
+		}
+		// Swap rows
+		prev, curr = curr, prev
+		// Clear curr for next iteration
+		for k := range curr {
+			curr[k] = 0
+		}
+	}
+
+	return prev[n]
 }
 
 func scoreToMatchType(score float64) matcher.MatchType {
@@ -397,7 +549,7 @@ func scoreToMatchType(score float64) matcher.MatchType {
 	}
 }
 
-func calculateCoverage(inputWords []string, tracks []matcher.Track) float64 {
+func calculateCoverage(inputWords []string, tracks []matcher.Track, originalText string) float64 {
 	if len(inputWords) == 0 {
 		return 0
 	}
@@ -407,7 +559,65 @@ func calculateCoverage(inputWords []string, tracks []matcher.Track) float64 {
 		covered += len(phraseWords)
 	}
 	ratio := float64(covered) / float64(len(inputWords))
-	return math.Min(ratio, 1.0) * 100
+	coverage := math.Min(ratio, 1.0) * 100
+
+	// Semantic reconstruction check: if key emotional words are missing, reduce coverage
+	if originalText != "" && len(tracks) > 0 {
+		keyWords := extractKeyWords(originalText)
+		if len(keyWords) > 0 {
+			allTrackText := strings.Builder{}
+			for _, t := range tracks {
+				allTrackText.WriteString(strings.ToUpper(t.Title))
+				allTrackText.WriteString(" ")
+			}
+			trackText := allTrackText.String()
+
+			missingCount := 0
+			for _, kw := range keyWords {
+				if !strings.Contains(trackText, kw) {
+					missingCount++
+				}
+			}
+
+			if missingCount > 0 {
+				missingRatio := float64(missingCount) / float64(len(keyWords))
+				if missingRatio > 0.5 {
+					coverage *= 0.8
+				}
+			}
+		}
+	}
+
+	return coverage
+}
+
+// extractKeyWords extracts important emotional/content words (not stop words).
+func extractKeyWords(text string) []string {
+	stopWords := map[string]bool{
+		"THE": true, "A": true, "AN": true, "AND": true, "OR": true,
+		"BUT": true, "IN": true, "ON": true, "AT": true, "TO": true,
+		"FOR": true, "OF": true, "WITH": true, "BY": true, "IS": true,
+		"IT": true, "I": true, "YOU": true, "HE": true, "SHE": true,
+		"WE": true, "THEY": true, "ME": true, "HIM": true, "HER": true,
+		"US": true, "THEM": true, "MY": true, "YOUR": true, "HIS": true,
+		"AM": true, "ARE": true, "WAS": true, "WERE": true, "BE": true,
+		"DO": true, "DOES": true, "DID": true, "HAVE": true, "HAS": true,
+		"HAD": true, "WILL": true, "WOULD": true, "COULD": true, "SHOULD": true,
+		"SO": true, "NOT": true, "NO": true, "IF": true, "THAT": true,
+		"THIS": true, "WHAT": true, "WHICH": true, "WHO": true, "WHEN": true,
+		"HOW": true, "WHY": true, "ALL": true, "CAN": true,
+	}
+
+	words := strings.Fields(strings.ToUpper(text))
+	var keyWords []string
+	seen := make(map[string]bool)
+	for _, w := range words {
+		if !stopWords[w] && !seen[w] && len(w) > 1 {
+			keyWords = append(keyWords, w)
+			seen[w] = true
+		}
+	}
+	return keyWords
 }
 
 func generateCaption() string {
