@@ -129,7 +129,10 @@ func (c *Client) SearchTracks(query string, limit int) ([]Track, error) {
 	c.mu.RUnlock()
 
 	encodedQuery := url.QueryEscape(query)
-	apiURL := fmt.Sprintf("https://api.spotify.com/v1/search?q=%s&type=track&limit=%d", encodedQuery, limit)
+	if limit < 1 || limit > 10 {
+		limit = 10
+	}
+	apiURL := fmt.Sprintf("https://api.spotify.com/v1/search?q=%s&type=track&limit=%d&offset=0&market=US", encodedQuery, limit)
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {

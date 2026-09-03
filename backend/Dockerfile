@@ -11,3 +11,6 @@ WORKDIR /app
 COPY --from=builder /app/server .
 EXPOSE 8086
 CMD ["./server"]
+
+# Run as non-root
+USER 1000:1000

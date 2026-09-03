@@ -99,7 +99,7 @@ func (h *Handler) generateWithMode(text string, mode matcher.Mode) GenerateRespo
 
 	// Searcher function: searches Spotify for a phrase and returns all results
 	searcher := func(phrase string) ([]matcher.Track, float64) {
-		spotifyTracks, err := h.container.Spotify.SearchTracks(phrase, 20)
+		spotifyTracks, err := h.container.Spotify.SearchTracks(phrase, 10)
 		if err != nil {
 			log.Printf("Search error for '%s': %v", phrase, err)
 			return nil, 0
